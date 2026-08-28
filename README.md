@@ -14,8 +14,9 @@ Frontend applications, backend services, deployment records, private configurati
 ## Build
 
 ```sh
-git clone --recurse-submodules https://github.com/wf-protocol/wf-contracts.git
+git clone https://github.com/wf-protocol/wf-contracts.git
 cd wf-contracts
+git submodule update --init lib/forge-std lib/openzeppelin-contracts lib/openzeppelin-contracts-upgradeable
 forge build
 forge test
 ```
