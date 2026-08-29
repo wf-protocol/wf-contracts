@@ -75,6 +75,8 @@ interface ILottoRounds {
     function roundOracleAssertionId(uint40 roundId) external view returns (bytes32);
     function roundDrawStatus(uint40 roundId) external view returns (DrawStatus);
     function isRoundDrawn(uint40 roundId) external view returns (bool);
+    function latestRoundId() external view returns (uint40);
+    function previousRoundId(uint40 roundId) external view returns (uint40);
     function getRound(uint40 roundId) external view returns (RoundData memory);
 
     function markDrawAssertionPending(

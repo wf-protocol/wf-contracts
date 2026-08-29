@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import {ILottoRounds} from "../src/games/lotto7uma/interfaces/ILottoRounds.sol";
+import {IUnifiedLedgerV2} from "../src/wusd/IUnifiedLedgerV2.sol";
+import {WusdLottoRounds} from "../src/games/wusd/lotto7uma/WusdLottoRounds.sol";
+
+contract WusdLottoRoundsOrderingTest is Test {
+    WusdLottoRounds internal rounds;
+
+    function setUp() public {
+        vm.warp(1_800_000_000);
+        rounds = WusdLottoRounds(
+            address(
+                new ERC1967Proxy(
+                    address(new WusdLottoRounds()),
+                    abi.encodeCall(
+                        WusdLottoRounds.initialize,
+                        (address(this), IUnifiedLedgerV2(address(0xBEEF)), address(0xCAFE), 1e6)
+                    )
+                )
+            )
+        );
+    }
+
+    function testRoundsFormAnImmutableCreationOrder() public {
+        _createRound(10);
+        _createRound(1_000);
+
+        assertEq(rounds.latestRoundId(), 1_000);
+        assertEq(rounds.previousRoundId(10), 0);
+        assertEq(rounds.previousRoundId(1_000), 10);
+    }
+
+    function testCannotCreateDuplicateOrDecreasingRoundId() public {
+        _createRound(100);
+
+        vm.expectRevert(WusdLottoRounds.InvalidRoundOrder.selector);
+        _createRound(100);
+        vm.expectRevert(WusdLottoRounds.InvalidRoundOrder.selector);
+        _createRound(99);
+    }
+
+    function _createRound(uint40 roundId) internal {
+        rounds.createRound(
+            roundId,
+            ILottoRounds.RoundConfig({
+                salesOpenTime: uint64(block.timestamp + 10),
+                salesCloseTime: uint64(block.timestamp + 20),
+                drawDataDeadline: uint64(block.timestamp + 30),
+                claimDeadline: uint64(block.timestamp + 40),
+                maxMultiplierPerTicket: 10,
+                assertionLiveness: 1
+            })
+        );
+    }
+}

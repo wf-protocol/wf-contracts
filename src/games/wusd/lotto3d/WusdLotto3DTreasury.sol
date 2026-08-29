@@ -300,12 +300,7 @@ contract WusdLotto3DTreasury is
         emit RoundAccountingFinalized(roundId, claimDeadline, winnerLiability, recycled);
     }
 
-    function payRoundClaim(uint40 roundId, address to, uint256 amount)
-        external
-        onlyRole(GAME_ROLE)
-        whenNotPaused
-        nonReentrant
-    {
+    function payRoundClaim(uint40 roundId, address to, uint256 amount) external onlyRole(GAME_ROLE) nonReentrant {
         _consumeRoundLiability(roundId, amount);
         if (to == address(0)) revert ZeroAddress();
         ledger.operatorTransfer(address(this), to, amount);
@@ -315,7 +310,6 @@ contract WusdLotto3DTreasury is
     function payRoundClaims(uint40[] calldata roundIds, address to, uint256[] calldata amounts)
         external
         onlyRole(GAME_ROLE)
-        whenNotPaused
         nonReentrant
     {
         if (to == address(0)) revert ZeroAddress();
@@ -380,7 +374,7 @@ contract WusdLotto3DTreasury is
     }
 
     /// @inheritdoc ILotto3DTreasury
-    function payRefund(address to, uint256 amount) external onlyRole(GAME_ROLE) whenNotPaused nonReentrant {
+    function payRefund(address to, uint256 amount) external onlyRole(GAME_ROLE) nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         if (amount > refundReserve || amount > ledger.balanceOf(address(this))) revert InsufficientBalance();

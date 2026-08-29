@@ -125,6 +125,24 @@ contract Lotto3DVRFAdapterTest is Test {
         adapter.setGame(ILotto3DGame(address(game)));
     }
 
+    function testTimedOutRequestCanBeClearedAfterRoundWasAlreadyCancelled() public {
+        _setReadyRound(4);
+        vm.prank(keeper);
+        adapter.requestDraw(4);
+
+        ILotto3DGame.RoundData memory round = game.getRound(4);
+        round.status = ILotto3DGame.RoundStatus.Cancelled;
+        game.setRound(4, round);
+        vm.warp(uint256(round.config.drawDeadline) + adapter.effectiveResponseTimeout() + 1);
+
+        adapter.cancelTimedOutRequest(4);
+        assertEq(adapter.pendingRequestCount(), 0);
+        assertTrue(adapter.drawFinalized(4));
+
+        vm.prank(admin);
+        adapter.setGame(ILotto3DGame(address(game)));
+    }
+
     function _setReadyRound(uint40 roundId) internal {
         ILotto3DGame.RoundData memory round;
         round.exists = true;

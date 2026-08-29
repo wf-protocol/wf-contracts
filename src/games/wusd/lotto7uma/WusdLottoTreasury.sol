@@ -452,7 +452,6 @@ contract WusdLottoTreasury is
     function payRoundClaim(uint40 roundId, address to, uint256 amount, uint256 recycledAmount)
         external
         onlyRole(SETTLEMENT_ROLE)
-        whenNotPaused
         nonReentrant
     {
         if (to == address(0)) revert ZeroAddress();
@@ -496,7 +495,7 @@ contract WusdLottoTreasury is
         if (recycledAmount > 0) emit FixedPrizeRecycled(recycledAmount);
     }
 
-    function payRefund(address to, uint256 amount) external onlyRole(ROUNDS_ROLE) whenNotPaused nonReentrant {
+    function payRefund(address to, uint256 amount) external onlyRole(ROUNDS_ROLE) nonReentrant {
         if (to == address(0)) {
             revert ZeroAddress();
         }

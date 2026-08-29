@@ -113,6 +113,7 @@ contract StablecoinReserve is
     error InsufficientReserve();
     error AmountOverflow();
     error UnsupportedTransferSemantics();
+    error UnsafeRateChange();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -263,6 +264,10 @@ contract StablecoinReserve is
         AssetConfig storage config = assetConfigs[token];
         if (!config.exists) revert AssetNotSupported();
         if (wusdRateBps == 0 || wusdRateBps > BPS) revert InvalidRate();
+        if (
+            wusdRateBps != config.wusdRateBps
+                && (config.depositEnabled || config.withdrawalEnabled || IERC20(token).balanceOf(address(this)) != 0)
+        ) revert UnsafeRateChange();
 
         config.wusdRateBps = wusdRateBps;
         config.singleDepositLimit = singleDepositLimit;

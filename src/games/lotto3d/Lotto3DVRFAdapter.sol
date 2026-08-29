@@ -178,7 +178,9 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
         delete pendingRequests[requestId];
         if (pendingRequestCount > 0) pendingRequestCount--;
         drawFinalized[roundId] = true;
-        game.cancelTimedOutRound(roundId);
+        if (round.status != ILotto3DGame.RoundStatus.Cancelled && round.status != ILotto3DGame.RoundStatus.Settled) {
+            game.cancelTimedOutRound(roundId);
+        }
         emit TimedOutRequestCancelled(roundId, requestId, responseDeadline);
     }
 

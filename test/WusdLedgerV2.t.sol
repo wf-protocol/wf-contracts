@@ -274,8 +274,11 @@ contract WusdLedgerV2Test is Test {
     }
 
     function test_RiskRateCreditsHaircutAndRedeemsAtSameRate() public {
-        vm.prank(admin);
+        vm.startPrank(admin);
+        reserve.setAssetStatus(address(usdt), false, false);
         reserve.setAssetRisk(address(usdt), 9_000, SINGLE_LIMIT, DAILY_DEPOSIT_LIMIT, DAILY_WITHDRAW_LIMIT);
+        reserve.setAssetStatus(address(usdt), true, true);
+        vm.stopPrank();
 
         uint256 deadline = block.timestamp + 15 minutes;
         bytes memory signature = _sign(user, address(usdt), 100e6, deadline, 1);
@@ -292,6 +295,19 @@ contract WusdLedgerV2Test is Test {
         assertEq(usdt.balanceOf(user) - before, 100e6);
         assertEq(ledger.totalWusdLiability(), 0);
         assertEq(reserve.totalRecognizedReserve(), 0);
+    }
+
+    function test_RateCannotChangeWhileAssetIsActiveOrFunded() public {
+        vm.prank(admin);
+        vm.expectRevert(StablecoinReserve.UnsafeRateChange.selector);
+        reserve.setAssetRisk(address(usdt), 1, SINGLE_LIMIT, DAILY_DEPOSIT_LIMIT, DAILY_WITHDRAW_LIMIT);
+
+        _deposit(user, address(usdt), 100e6, 1);
+        vm.startPrank(admin);
+        reserve.setAssetStatus(address(usdt), false, false);
+        vm.expectRevert(StablecoinReserve.UnsafeRateChange.selector);
+        reserve.setAssetRisk(address(usdt), 1, SINGLE_LIMIT, DAILY_DEPOSIT_LIMIT, DAILY_WITHDRAW_LIMIT);
+        vm.stopPrank();
     }
 
     function testFuzz_InternalTransfersPreserveTotalLiability(uint96 rawDeposit, uint96 rawSpend) public {

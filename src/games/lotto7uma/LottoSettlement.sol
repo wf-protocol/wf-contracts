@@ -50,6 +50,8 @@ contract LottoSettlement is
     error ClaimPeriodOutOfRange();
     error RoundClaimsNotExpirable();
     error SettlementCountingIncomplete(uint256 processed, uint256 total);
+    error PreviousRoundUnresolved(uint40 previousRoundId);
+    error ActiveRoundExists(uint40 roundId);
 
     struct RoundSettlement {
         bool posted;
@@ -174,14 +176,16 @@ contract LottoSettlement is
     }
 
     /// @notice Update per-unit payout caps for floating tiers. 0 = no cap.
-    function setPayoutCaps(uint256 cap1, uint256 cap2, uint256 cap3) external onlyRole(ADMIN_ROLE) {
+    function setPayoutCaps(uint256 cap1, uint256 cap2, uint256 cap3) external onlyRole(ADMIN_ROLE) whenPaused {
+        _requireNoActiveRound();
         payoutCap1 = cap1;
         payoutCap2 = cap2;
         payoutCap3 = cap3;
     }
 
     /// @notice Update the floating-tier (1/2/3) budget split. Must sum to BPS.
-    function setFloatBps(uint256 t1, uint256 t2, uint256 t3) external onlyRole(ADMIN_ROLE) {
+    function setFloatBps(uint256 t1, uint256 t2, uint256 t3) external onlyRole(ADMIN_ROLE) whenPaused {
+        _requireNoActiveRound();
         if (t1 + t2 + t3 != BPS) {
             revert InvalidConfig();
         }
@@ -192,14 +196,16 @@ contract LottoSettlement is
     }
 
     /// @notice Update the fixed per-unit payout for tiers 4/5.
-    function setFixedPrizes(uint256 tier4, uint256 tier5) external onlyRole(ADMIN_ROLE) {
+    function setFixedPrizes(uint256 tier4, uint256 tier5) external onlyRole(ADMIN_ROLE) whenPaused {
+        _requireNoActiveRound();
         fixedTier4 = tier4;
         fixedTier5 = tier5;
         emit SettlementConfigUpdated(floatTier1Bps, floatTier2Bps, floatTier3Bps, tier4, tier5, circuitBreakerBps);
     }
 
     /// @notice Update the circuit-breaker cap (bps of round sales) for fixed tiers 4/5.
-    function setCircuitBreaker(uint256 bps) external onlyRole(ADMIN_ROLE) {
+    function setCircuitBreaker(uint256 bps) external onlyRole(ADMIN_ROLE) whenPaused {
+        _requireNoActiveRound();
         if (bps > BPS) {
             revert InvalidConfig();
         }
@@ -252,17 +258,20 @@ contract LottoSettlement is
         // tiers and are not used to expand the fixed-prize budget.
         uint256 circuitCap = (totalSales * circuitBreakerBps) / BPS;
 
+        uint256 fixedBudget = fixedTotal < circuitCap ? fixedTotal : circuitCap;
+        if (fixedBudget > prizePool) fixedBudget = prizePool;
+
         uint256 payout4;
         uint256 payout5;
-        if (fixedTotal > circuitCap && fixedTotal > 0) {
-            payout4 = (circuitCap * fixedTier4) / fixedTotal;
-            payout5 = (circuitCap * fixedTier5) / fixedTotal;
+        if (fixedTotal > fixedBudget && fixedTotal > 0) {
+            payout4 = (fixedBudget * fixedTier4) / fixedTotal;
+            payout5 = (fixedBudget * fixedTier5) / fixedTotal;
         } else {
             payout4 = fixedTier4;
             payout5 = fixedTier5;
         }
 
-        uint256 fixedReserve = fixedTotal < circuitCap ? fixedTotal : circuitCap;
+        uint256 fixedReserve = fixedBudget;
         uint256 floatPool = prizePool > fixedReserve ? prizePool - fixedReserve : 0;
 
         uint256 payout1 = _calcTierFloat(winUnits1, floatPool, floatTier1Bps, payoutCap1);
@@ -329,6 +338,13 @@ contract LottoSettlement is
         if (roundId == 0) revert InvalidRound();
         if (!rounds.isRoundDrawn(roundId)) revert RoundNotDrawn();
         if (_settlements[roundId].posted) revert SettlementAlreadyPosted();
+
+        uint40 previous = rounds.previousRoundId(roundId);
+        while (previous != 0 && !_settlements[previous].posted) {
+            ILottoRounds.RoundData memory previousRound = rounds.getRound(previous);
+            if (!previousRound.cancelled) revert PreviousRoundUnresolved(previous);
+            previous = rounds.previousRoundId(previous);
+        }
     }
 
     function _processTicketBatch(uint40 roundId, uint256 maxTickets) private {
@@ -362,7 +378,7 @@ contract LottoSettlement is
     ///         ticket's buyer; tier and amount are recomputed on-chain from the
     ///         ticket's stored number/multiplier - no proof or external input
     ///         is trusted.
-    function claim(uint256 ticketId) external whenNotPaused nonReentrant {
+    function claim(uint256 ticketId) external nonReentrant {
         ILottoRounds.TicketData memory ticket = rounds.getTicket(ticketId);
         if (ticket.buyer == address(0)) {
             revert InvalidTicket();
@@ -496,6 +512,7 @@ contract LottoSettlement is
     }
 
     function setClaimPeriod(uint64 newPeriod) external onlyRole(ADMIN_ROLE) whenPaused {
+        _requireNoActiveRound();
         if (newPeriod < 1 days || newPeriod > 365 days) revert ClaimPeriodOutOfRange();
         uint64 previous = _effectiveClaimPeriod();
         claimPeriod = newPeriod;
@@ -504,6 +521,14 @@ contract LottoSettlement is
 
     function _effectiveClaimPeriod() internal view returns (uint64) {
         return claimPeriod == 0 ? DEFAULT_CLAIM_PERIOD : claimPeriod;
+    }
+
+    function _requireNoActiveRound() internal view {
+        uint40 latest = rounds.latestRoundId();
+        while (latest != 0 && !_settlements[latest].posted) {
+            if (!rounds.getRound(latest).cancelled) revert ActiveRoundExists(latest);
+            latest = rounds.previousRoundId(latest);
+        }
     }
 
     function _authorizeUpgrade(address) internal override onlyRole(ADMIN_ROLE) {}

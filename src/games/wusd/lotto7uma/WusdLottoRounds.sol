@@ -75,6 +75,8 @@ contract WusdLottoRounds is
     error LegacyPurchasesAreDisabled();
     error RevenueAlreadyActive();
     error InvalidRevenueAllocation();
+    error RoundOrderingNotInitialized();
+    error InvalidRoundOrder();
 
     IUnifiedLedgerV2 public ledger;
     address public treasury;
@@ -97,6 +99,9 @@ contract WusdLottoRounds is
     bool public legacyPurchasesDisabled;
     mapping(uint40 roundId => uint256[] ticketIds) private _roundTicketIds;
     bool public revenueAllocationEnabled;
+    uint40 public latestRoundId;
+    mapping(uint40 roundId => uint40 previous) public previousRoundId;
+    bool public roundOrderingEnabled;
 
     event RoundCreated(uint40 indexed roundId);
     event SalesClosed(uint40 indexed roundId);
@@ -117,6 +122,7 @@ contract WusdLottoRounds is
         bytes32 indexed receiptId, uint40 indexed roundId, address indexed payer, address beneficiary, uint256 amount
     );
     event LegacyPurchasesPermanentlyDisabled();
+    event RoundOrderingInitialized(uint40 indexed latestExistingRoundId);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -140,15 +146,18 @@ contract WusdLottoRounds is
         ledger = ledger_;
         treasury = treasury_;
         ticketPrice = ticketPrice_;
+        roundOrderingEnabled = true;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
     }
 
     function createRound(uint40 roundId, RoundConfig calldata config) external onlyRole(ADMIN_ROLE) {
+        if (!roundOrderingEnabled) revert RoundOrderingNotInitialized();
         if (roundId == 0) {
             revert InvalidRound();
         }
+        if (roundId <= latestRoundId) revert InvalidRoundOrder();
         if (_rounds[roundId].exists) {
             revert RoundAlreadyExists();
         }
@@ -167,8 +176,20 @@ contract WusdLottoRounds is
         RoundData storage roundData = _rounds[roundId];
         roundData.exists = true;
         roundData.config = config;
+        previousRoundId[roundId] = latestRoundId;
+        latestRoundId = roundId;
 
         emit RoundCreated(roundId);
+    }
+
+    /// @notice Enables ordered settlement after upgrading an existing proxy.
+    /// @dev Existing unresolved rounds must be settled or cancelled before this migration.
+    function initializeRoundOrdering(uint40 latestExistingRoundId) external reinitializer(3) onlyRole(ADMIN_ROLE) {
+        if (roundOrderingEnabled) revert InvalidRoundOrder();
+        if (latestExistingRoundId != 0 && !_rounds[latestExistingRoundId].exists) revert InvalidRound();
+        latestRoundId = latestExistingRoundId;
+        roundOrderingEnabled = true;
+        emit RoundOrderingInitialized(latestExistingRoundId);
     }
 
     function protocolImplementationHash() external view returns (bytes32) {
@@ -574,7 +595,7 @@ contract WusdLottoRounds is
     }
 
     /// @notice Refund a ticket from a cancelled round. Anyone can call for any ticket.
-    function refundTicket(uint256 ticketId) external whenNotPaused nonReentrant {
+    function refundTicket(uint256 ticketId) external nonReentrant {
         TicketData storage ticket = tickets[ticketId];
         if (ticket.buyer == address(0)) {
             revert InvalidRound();
