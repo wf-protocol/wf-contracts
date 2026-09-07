@@ -25,6 +25,7 @@ contract MockLotto3DOrderingTreasury {
 contract WusdLotto3DOrderingTest is Test {
     WusdLotto3DGame internal game;
     MockLotto3DOrderingTreasury internal treasury;
+    address internal constant KEEPER = address(0xA11CE);
 
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -41,6 +42,7 @@ contract WusdLotto3DOrderingTest is Test {
             )
         );
         game.grantRole(game.VRF_ROLE(), address(this));
+        game.grantRole(game.KEEPER_ROLE(), KEEPER);
     }
 
     function testCannotSettleLaterRoundBeforeItsPredecessor() public {
@@ -66,6 +68,27 @@ contract WusdLotto3DOrderingTest is Test {
 
         vm.expectRevert(WusdLotto3DGame.InvalidRoundOrder.selector);
         _createClosedRound(999);
+    }
+
+    function testKeeperCanOnlyCancelAfterDrawDeadline() public {
+        _createClosedRound(1);
+
+        vm.prank(KEEPER);
+        vm.expectRevert(WusdLotto3DGame.SalesNotClosed.selector);
+        game.cancelTimedOutRound(1);
+
+        vm.warp(block.timestamp + 101);
+        vm.prank(KEEPER);
+        game.cancelTimedOutRound(1);
+
+        assertEq(uint8(game.getRound(1).status), uint8(ILotto3DGame.RoundStatus.Cancelled));
+    }
+
+    function testKeeperCanCreateRound() public {
+        vm.prank(KEEPER);
+        _createClosedRound(1);
+
+        assertTrue(game.getRound(1).exists);
     }
 
     function _createClosedRound(uint40 roundId) internal {

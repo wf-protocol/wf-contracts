@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev 原样移植自 lotto7-refactored/src/libraries/LottoPrizeMath.sol，逻辑未作任何改动。
+///      7 位数字彩票（Lotto7）的号码匹配/等级判定纯数学库，不涉及资金操作，
+///      因此不受本次"接入 LedgerContract"改造影响。
 library LottoPrizeMath {
     uint32 internal constant NUMBER_MODULUS = 10_000_000;
 

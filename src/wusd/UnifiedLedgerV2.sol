@@ -10,6 +10,8 @@ import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/ut
 import {IUnifiedLedgerV2} from "./IUnifiedLedgerV2.sol";
 
 /// @title UnifiedLedgerV2
+/// @notice 平台统一的 WUSD 内部账本。WUSD 仅作为 6 位小数记账单位，不是 ERC-20。
+/// @dev 只有受信任 Reserve 能增减总负债；游戏只能在用户授权范围内零和移动既有余额。
 contract UnifiedLedgerV2 is
     Initializable,
     UUPSUpgradeable,
@@ -29,6 +31,8 @@ contract UnifiedLedgerV2 is
     mapping(address operator => bool enabled) public operators;
 
     uint256 public totalWusdLiability;
+    /// @notice 经管理员审计并登记、可在玩家主动购票时免独立额度授权的游戏合约。
+    /// @dev 追加在既有存储布局末尾，确保 UUPS 升级兼容。
     mapping(address operator => bool enabled) public directOperators;
 
     event ReserveCredit(address indexed reserve, address indexed account, uint256 amount, uint256 newBalance);
@@ -97,6 +101,7 @@ contract UnifiedLedgerV2 is
         emit ReserveCredit(msg.sender, account, amount, newBalance);
     }
 
+    /// @notice 提现销毁路径故意不受暂停影响，确保暂停游戏或充值时用户仍能退出。
     function debitToReserve(address account, uint256 amount) external onlyRole(RESERVE_ROLE) nonReentrant {
         if (account == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
@@ -125,6 +130,9 @@ contract UnifiedLedgerV2 is
         _operatorTransfer(from, to, amount);
     }
 
+    /// @notice 玩家直接调用已登记游戏的 buy 函数时，由游戏在同一笔交易内扣除 WUSD。
+    /// @dev 这是免 approve 的快捷路径。只有同时位于 operators 与 directOperators
+    ///      白名单的合约才能调用；代买/中继函数继续使用 operatorTransfer 和用户额度。
     function directOperatorTransfer(address from, address to, uint256 amount)
         public
         virtual
@@ -185,6 +193,7 @@ contract UnifiedLedgerV2 is
         emit DirectOperatorSet(operator, enabled);
     }
 
+    /// @notice 暂停储备入账和游戏转账；不暂停提现销毁路径与用户撤销授权。
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }

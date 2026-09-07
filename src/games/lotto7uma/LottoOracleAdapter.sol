@@ -14,6 +14,11 @@ import {ILottoRounds} from "./interfaces/ILottoRounds.sol";
 import {IOptimisticOracleV3} from "./interfaces/IOptimisticOracleV3.sol";
 import {LottoPrizeMath} from "../libraries/LottoPrizeMath.sol";
 
+/// @dev 原样移植自 smart-contract-pd-main/src/LottoOracleAdapter.sol，逻辑未作改动。
+///      本合约只负责 UMA Optimistic Oracle V3 的断言/仲裁交互，不持有、不挪动任何
+///      用户资金（保证金 bond 用的是独立的 `defaultCurrency`，由 depositBond 存入
+///      本合约自身，与 LedgerContract 账本完全无关），因此不受本次"接入
+///      LedgerContract、取代 GlobalVault"改造影响。
 contract LottoOracleAdapter is
     Initializable,
     AccessControlUpgradeable,

@@ -9,14 +9,15 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ILotto3DGame} from "./interfaces/ILotto3DGame.sol";
 import {IVRFCoordinatorV2Plus} from "./interfaces/IVRFCoordinatorV2.sol";
 
+/// @dev 原样移植自 lotto7-refactored/src/lotto3d/Lotto3DVRFAdapter.sol，逻辑未作改动。
 /// @title Lotto3DVRFAdapter
 /// @notice Chainlink VRF v2+ integration for 3D lottery draw.
 contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgradeable, PausableUpgradeable {
-    // --- Roles ----------------------------------------------------------
+    // ─── Roles ──────────────────────────────────────────────────────────
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
 
-    // --- Errors ---------------------------------------------------------
+    // ─── Errors ─────────────────────────────────────────────────────────
     error ZeroAddress();
     error InvalidRound();
     error RequestAlreadyPending();
@@ -31,7 +32,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
     error ResponseDeadlineNotReached(uint256 responseDeadline);
     error InvalidResponseTimeout();
 
-    // --- Structs --------------------------------------------------------
+    // ─── Structs ────────────────────────────────────────────────────────
     struct VRFConfig {
         address vrfCoordinator;
         bytes32 keyHash;
@@ -45,7 +46,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
         bool exists;
     }
 
-    // --- State ----------------------------------------------------------
+    // ─── State ──────────────────────────────────────────────────────────
     ILotto3DGame public game;
     VRFConfig public vrfConfig;
 
@@ -63,7 +64,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
     uint64 public constant MIN_RESPONSE_TIMEOUT = 15 minutes;
     uint64 public constant MAX_RESPONSE_TIMEOUT = 1 days;
 
-    // --- Events ---------------------------------------------------------
+    // ─── Events ─────────────────────────────────────────────────────────
     event DrawRequested(uint40 indexed roundId, uint256 indexed requestId);
     event DrawFulfilled(uint40 indexed roundId, uint256 indexed requestId, uint16 winningNumber);
     event RandomnessStored(uint40 indexed roundId, uint256 indexed requestId, uint16 winningNumber);
@@ -95,7 +96,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
         _grantRole(ADMIN_ROLE, admin_);
     }
 
-    // --- Request Draw ---------------------------------------------------
+    // ─── Request Draw ───────────────────────────────────────────────────
 
     function requestDraw(uint40 roundId) external onlyRole(KEEPER_ROLE) whenNotPaused returns (uint256 requestId) {
         if (roundId == 0) revert InvalidRound();
@@ -121,7 +122,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit DrawRequested(roundId, requestId);
     }
 
-    // --- VRF Callback ---------------------------------------------------
+    // ─── VRF Callback ───────────────────────────────────────────────────
 
     function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
         if (msg.sender != vrfConfig.vrfCoordinator) revert UnauthorizedCallback();
@@ -184,7 +185,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
         emit TimedOutRequestCancelled(roundId, requestId, responseDeadline);
     }
 
-    // --- Admin ----------------------------------------------------------
+    // ─── Admin ──────────────────────────────────────────────────────────
 
     function setVRFConfig(VRFConfig calldata vrfConfig_) external onlyRole(ADMIN_ROLE) {
         if (vrfConfig_.vrfCoordinator == address(0)) revert ZeroAddress();
@@ -222,7 +223,7 @@ contract Lotto3DVRFAdapter is Initializable, UUPSUpgradeable, AccessControlUpgra
 
     function _authorizeUpgrade(address) internal override onlyRole(ADMIN_ROLE) {}
 
-    // --- Internal VRF ---------------------------------------------------
+    // ─── Internal VRF ───────────────────────────────────────────────────
 
     function _requestRandomWords() internal returns (uint256 requestId) {
         // The subscription is funded with native POL on Polygon. An empty

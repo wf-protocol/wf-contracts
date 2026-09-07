@@ -16,6 +16,7 @@ import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/ut
 import {IUnifiedLedgerV2} from "./IUnifiedLedgerV2.sol";
 
 /// @title StablecoinReserve
+/// @notice 托管真实稳定币，并在充值/提现时与 UnifiedLedgerV2 的 WUSD 总负债同步变化。
 contract StablecoinReserve is
     Initializable,
     UUPSUpgradeable,
@@ -180,6 +181,7 @@ contract StablecoinReserve is
         emit Deposited(msg.sender, token, amount, received, wusdCredited, nonce);
     }
 
+    /// @notice 用户可选择任一启用提现且储备充足的资产；该路径不受充值全局暂停影响。
     function withdraw(address token, uint256 wusdAmount, uint256 minTokenOut, address recipient)
         external
         nonReentrant
@@ -198,6 +200,8 @@ contract StablecoinReserve is
         }
         _consumeWindow(withdrawalWindows[msg.sender][token], wusdAmount, config.dailyWithdrawLimit, false);
 
+        // 直接转入本合约的资产属于无负债储备盈余，也可以用于兑付 WUSD。统计值只扣到 0，
+        // 真实 ERC-20 余额始终是能否提现的最终依据。
         uint256 reserveBefore = IERC20(token).balanceOf(address(this));
         uint256 recipientBefore = IERC20(token).balanceOf(recipient);
         ledger.debitToReserve(msg.sender, wusdAmount);
@@ -312,6 +316,7 @@ contract StablecoinReserve is
         return _wusdToToken(wusdAmount, config.decimals, config.wusdRateBps);
     }
 
+    /// @notice 以当前风险价格计算合约实际持有资产的 WUSD 价值。
     function totalRecognizedReserve() public view returns (uint256 total) {
         for (uint256 i = 0; i < _assets.length; i++) {
             address token = _assets[i];
@@ -337,6 +342,7 @@ contract StablecoinReserve is
     }
 
     function _wusdToToken(uint256 wusdAmount, uint8 decimals, uint16 rateBps) internal pure returns (uint256) {
+        // 向下取整，确保每次提现减少的储备价值不会超过销毁的 WUSD 负债。
         uint256 normalized = Math.mulDiv(wusdAmount, BPS, rateBps);
         if (decimals == WUSD_DECIMALS) return normalized;
         if (decimals > WUSD_DECIMALS) return normalized * (10 ** (decimals - WUSD_DECIMALS));

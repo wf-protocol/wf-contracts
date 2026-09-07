@@ -12,12 +12,60 @@ import {ILottoTreasury} from "./interfaces/ILottoTreasury.sol";
 import {LottoPrizeMath} from "../libraries/LottoPrizeMath.sol";
 import {IWusdLottoUmaRevenueTreasury} from "../wusd/lotto7uma/IWusdLottoUmaRevenueTreasury.sol";
 
-/// @title LottoSettlement
-/// @notice Computes winning tiers and payouts entirely from on-chain ticket data.
-/// @dev Claims are ticket-based and settlement is deterministic; no Merkle root
-///      or trusted settler input is used.
+/// @title LottoSettlement（UMA 结算版 —— 全链上结算，无 Merkle 树）
+/// @notice 全部由链上状态直接计算中奖等级、份数与派彩金额；不再信任任何外部提交的
+///         份数/归属/Merkle 树数据。
+/// @dev 本文件是"消除 SETTLER_ROLE 信任集中点"改造的核心改动。相对
+///      smart-contract-pd-main/src/LottoSettlement.sol 原版，本次做了以下实质性重写
+///      （原版用注释记录的信任模型问题——"SETTLER_ROLE 能在预算内错误分配奖金给
+///      错的人"——通过下面的改动被彻底消除，不是缓解）：
 ///
-/// Token assumption:
+///      1. 移除 Merkle 树整条链路：不再有 `merkleRoot`/`reportHash`/`leafHash`/
+///         `MerkleProof.verify`。原来一二三等奖份数虽然链上校验总数，但"这些份数
+///         该给谁"完全信任 settler 构造的 Merkle 叶子；四五等奖份数和归属则完全
+///         没有链上校验。现在这两个信任面都不存在了。
+///
+///      2. `postSettlement` 从"需要 SETTLER_ROLE 提交 15 个参数供链上核对"变成
+///         "任何人都能调用、零参数（仅 roundId）、结果完全由链上状态决定"：
+///         - 一二三等奖份数：继续用 `exact7Units`/`prefix6Units`/`prefix5Units`
+///           前缀计数器直接算（原来这部分链上已经在做校验，现在改成直接算，
+///           不再需要外部输入再核对一遍）。
+///         - 所有奖级份数：分批读取本轮票据，并用 `LottoPrizeMath.highestTier`
+///           为每张票只累计一个最高奖级。批处理没有单笔交易随票数无限增长的
+///           gas 风险，也避免滑动窗口聚合计数器把高奖票重复计入四、五等奖。
+///         - 派彩金额：不再由 settler 提议、链上只做预算上限校验，而是完全由
+///           链上参数（`floatTierXBps`/`fixedTierX`/`payoutCapX`/
+///           `circuitBreakerBps`，均为管理员配置，采用与 VRF 版
+///           `Lotto7Game` 完全相同的浮动奖池/固定奖/熔断计算公式）算出。
+///         - `SETTLER_ROLE` 角色被完全移除：`postSettlement` 不再需要任何调用者
+///           权限校验，因为结果对任何调用者都是同一个确定性计算，无法被操纵。
+///
+///      3. `claim` 从"用户提交 tier+winningUnits+amount+Merkle proof，链上验证叶子
+///         是否在树里"变成"用户只提交自己的 `ticketId`"：链上从
+///         `LottoRounds.getTicket(ticketId)` 读出该彩票买的号码和倍数，用
+///         `LottoPrizeMath.highestTier` 重新判定中奖等级，用 `postSettlement`
+///         阶段算好并存储的每单位派彩金额 × 倍数算出应得金额，再调用
+///         `LottoRounds.markTicketClaimed` 防止同一张彩票重复领取（取代原来
+///         `claimed[roundId][user][tier]` + `claimedWinningUnits` 的 tier 粒度防重放，
+///         现在是更细粒度的 ticket 粒度，且完全不需要信任 settler 报告的
+///         `winningUnits`——每张票该拿多少钱，链上自己从号码算得出来）。
+///
+///      4. Carry（滚存）逻辑：不再由 settler 提议 `carryNext` 供链上做预算校验，
+///         而是 `carryNext = floatPool - 已派发的一二三等奖金额总和`——浮动奖池
+///         减去实际派出去的部分，剩余自动滚存，链上自己算，不存在"settler 少报
+///         carryNext 从而让某个数字消失"的空间。`LottoTreasury.applySettlementCarry`
+///         的封顶/超额转 fund 逻辑保持不变（那部分只处理"总量"的滚存上限，不涉及
+///         "归属哪个用户"的信任问题，原样复用）。
+///
+///      5. 历史轮次保留原滑动窗口重复预留的领奖回收逻辑；升级后的轮次通过排他
+///         计数从源头消除重复负债，不再依赖领奖时回收。
+///
+///      本合约自身仍然不直接持有、不直接挪动任何资金——实际转账通过
+///      `ILottoTreasury.payClaim`（Treasury 内部经由 LedgerContract.operatorTransfer
+///      完成），与 LedgerContract 接入改造（.kiro/specs/ledger-internal-transfer）
+///      正交，不受影响。
+///
+/// TOKEN ASSUMPTION（原版设计，未改动）：
 /// - This contract assumes the payment token is a standard ERC20 with exact
 ///   transfer semantics. Fee-on-transfer, rebasing, or deflationary tokens are
 ///   NOT supported and will cause accounting drift.
@@ -33,6 +81,8 @@ contract LottoSettlement is
     uint256 public constant BPS = 10_000;
     /// @dev 80% of sales feed the prize budget; the remaining 20% (OPS_BPS +
     ///      DIVIDEND_BPS in LottoTreasury) is collected via `collectRevenue`.
+    ///      与原版硬编码的 8000/10000 保持一致，只是原来写死在 postSettlement 里，
+    ///      现在提成一个具名常量。
     uint256 public constant PRIZE_ALLOC_BPS = 8000;
     uint64 public constant DEFAULT_CLAIM_PERIOD = 90 days;
     uint256 public constant AUTO_COUNT_LIMIT = 100;
@@ -222,7 +272,7 @@ contract LottoSettlement is
     }
 
     /// @notice Settle a drawn round entirely from on-chain state. Anyone may
-    ///         call this - the result is a deterministic function of on-chain
+    ///         call this — the result is a deterministic function of on-chain
     ///         counters and admin-configured parameters, so there is nothing
     ///         for a caller to manipulate. This removes the SETTLER_ROLE trust
     ///         point entirely (see contract-level NatSpec).
@@ -252,6 +302,7 @@ contract LottoSettlement is
             : (totalSales * PRIZE_ALLOC_BPS) / BPS;
         uint256 prizePool = roundPrizeAmount + prevCarry;
 
+        // ---- Tier 4/5：固定单价，超出熔断预算按比例缩水（与 VRF 版算法一致） ----
         uint256 fixedTotal = winUnits4 * fixedTier4 + winUnits5 * fixedTier5;
         // The fixed-prize circuit breaker is based on this round's sales, not
         // the total prize pool. Carry funds remain available to the floating
@@ -274,10 +325,13 @@ contract LottoSettlement is
         uint256 fixedReserve = fixedBudget;
         uint256 floatPool = prizePool > fixedReserve ? prizePool - fixedReserve : 0;
 
+        // ---- Tier 1/2/3：按配置的 bps 从统一浮动奖池分账，逐级计算 ----
         uint256 payout1 = _calcTierFloat(winUnits1, floatPool, floatTier1Bps, payoutCap1);
         uint256 payout2 = _calcTierFloat(winUnits2, floatPool, floatTier2Bps, payoutCap2);
         uint256 payout3 = _calcTierFloat(winUnits3, floatPool, floatTier3Bps, payoutCap3);
 
+        // 未派发出去的浮动奖池份额（无中奖者、封顶节省、取整余数）全部自动滚存到
+        // 下一轮，不存在"settler 少报 carryNext"的空间。
         uint256 totalFloatPaid = payout1 * winUnits1 + payout2 * winUnits2 + payout3 * winUnits3;
         uint256 totalFixedPaid = payout4 * winUnits4 + payout5 * winUnits5;
         uint256 prizeReserveAmount = totalFloatPaid + totalFixedPaid;
@@ -376,7 +430,7 @@ contract LottoSettlement is
 
     /// @notice Claim the prize for a single ticket. The caller must be the
     ///         ticket's buyer; tier and amount are recomputed on-chain from the
-    ///         ticket's stored number/multiplier - no proof or external input
+    ///         ticket's stored number/multiplier — no proof or external input
     ///         is trusted.
     function claim(uint256 ticketId) external nonReentrant {
         ILottoRounds.TicketData memory ticket = rounds.getTicket(ticketId);
@@ -411,7 +465,7 @@ contract LottoSettlement is
             ? 0
             : _calcForfeitedFixed(ticket.number, winningNumber, ticket.multiplier, tier, settlementData);
 
-        // Reverts with TicketAlreadyClaimed if already claimed - this is the
+        // Reverts with TicketAlreadyClaimed if already claimed — this is the
         // sole replay-protection check, at ticket granularity.
         rounds.markTicketClaimed(ticketId);
         if (roundLiabilityAccountingEnabled[ticket.roundId]) {
@@ -424,6 +478,9 @@ contract LottoSettlement is
         emit PrizeClaimed(ticket.roundId, ticketId, msg.sender, tier, amount);
     }
 
+    /// @dev 判断某张一二三等奖中奖票的号码，是否也落在四位/三位滑动窗口里，从而
+    ///      算出应该回收多少"被重复预留但从未真正以四五等奖名义派发"的资金。
+    ///      与 VRF 版 Lotto7Game._calcForfeitedFixed 逐位对应，未作改动。
     function _calcForfeitedFixed(
         uint32 myNum,
         uint32 winNum,

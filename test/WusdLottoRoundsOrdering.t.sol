@@ -10,6 +10,7 @@ import {WusdLottoRounds} from "../src/games/wusd/lotto7uma/WusdLottoRounds.sol";
 
 contract WusdLottoRoundsOrderingTest is Test {
     WusdLottoRounds internal rounds;
+    address internal constant KEEPER = address(0xA11CE);
 
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -24,6 +25,7 @@ contract WusdLottoRoundsOrderingTest is Test {
                 )
             )
         );
+        rounds.grantRole(rounds.KEEPER_ROLE(), KEEPER);
     }
 
     function testRoundsFormAnImmutableCreationOrder() public {
@@ -42,6 +44,13 @@ contract WusdLottoRoundsOrderingTest is Test {
         _createRound(100);
         vm.expectRevert(WusdLottoRounds.InvalidRoundOrder.selector);
         _createRound(99);
+    }
+
+    function testKeeperCanCreateRound() public {
+        vm.prank(KEEPER);
+        _createRound(1);
+
+        assertEq(rounds.latestRoundId(), 1);
     }
 
     function _createRound(uint40 roundId) internal {

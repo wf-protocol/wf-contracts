@@ -15,6 +15,7 @@ import {ILotto3DTreasury} from "../../lotto3d/interfaces/ILotto3DTreasury.sol";
 import {IWusdLotto3DTreasury} from "./IWusdLotto3DTreasury.sol";
 
 /// @title WusdLotto3DTreasury
+/// @notice 使用 WUSD 管理 3D 彩票的当期奖池、累积池、退款准备金和运营收入。
 contract WusdLotto3DTreasury is
     Initializable,
     UUPSUpgradeable,
@@ -23,20 +24,20 @@ contract WusdLotto3DTreasury is
     ReentrancyGuard,
     IWusdLotto3DTreasury
 {
-    // --- Roles ----------------------------------------------------------
+    // ─── Roles ──────────────────────────────────────────────────────────
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant GAME_ROLE = keccak256("GAME_ROLE");
     bytes32 public constant OPS_ROLE = keccak256("OPS_ROLE");
     bytes32 public constant REVENUE_SETTLER_ROLE = keccak256("REVENUE_SETTLER_ROLE");
 
-    // --- Constants ------------------------------------------------------
+    // ─── Constants ──────────────────────────────────────────────────────
     uint256 public constant PRIZE_BPS = 5000; // 50% to current prize pool
     uint256 public constant ACCUMULATE_BPS = 3000; // 30% to accumulated pool
     uint256 public constant OPS_BPS = 2000; // 20% to ops
     uint256 public constant RELEASE_BPS = 3000; // release 30% of accumulated pool
     uint256 public constant BPS_BASE = 10000;
 
-    // --- Errors ---------------------------------------------------------
+    // ─── Errors ─────────────────────────────────────────────────────────
     error ZeroAddress();
     error ZeroAmount();
     error InsufficientBalance();
@@ -51,10 +52,11 @@ contract WusdLotto3DTreasury is
     error RevenueNotConfigured();
     error RoundAllocationAlreadySnapshotted();
     error RoundAllocationNotSnapshotted();
-    error PartnerBatchAlreadyProcessed();
-    error InvalidPartnerBatch();
+    error PartnerCollectionAlreadyProcessed();
+    error InvalidPartnerCollection();
+    error OnlyPartnerPayoutSafe();
 
-    // --- State ----------------------------------------------------------
+    // ─── State ──────────────────────────────────────────────────────────
     IUnifiedLedgerV2 public ledger;
 
     uint256 public accumulatedPool;
@@ -86,7 +88,7 @@ contract WusdLotto3DTreasury is
     mapping(uint256 roundId => bool finalized) public revenueFinalized;
     mapping(bytes32 batchId => bool processed) public partnerBatchProcessed;
 
-    // --- Events ---------------------------------------------------------
+    // ─── Events ─────────────────────────────────────────────────────────
     event SalesCollected(
         uint40 indexed roundId, uint256 totalSales, uint256 prizeAmount, uint256 accumulateAmount, uint256 opsAmount
     );
@@ -118,12 +120,8 @@ contract WusdLotto3DTreasury is
         uint256 partnerAmount,
         uint256 opsAmount
     );
-    event PartnerReserveSettled(
-        bytes32 indexed batchId,
-        bytes32 indexed attributionRoot,
-        uint256 partnerPayable,
-        uint256 wfFallback,
-        uint256 reserveRemaining
+    event PartnerReserveClaimed(
+        bytes32 indexed collectionId, bytes32 indexed accountingRoot, uint256 amount, uint256 reserveRemaining
     );
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -147,6 +145,8 @@ contract WusdLotto3DTreasury is
         legacyAccountingReconciled = true;
     }
 
+    /// @notice 在代理部署完成后，为 Treasury 自有 WUSD 建立支出额度。
+    /// @dev 不可放在代理构造期的 initializer 中；构造期跨合约调用的 msg.sender 是部署者。
     function syncLedgerAllowance() external onlyRole(ADMIN_ROLE) {
         ledger.approveOperator(address(this), type(uint256).max);
     }
@@ -200,7 +200,7 @@ contract WusdLotto3DTreasury is
         return _roundRevenueAllocations[roundId];
     }
 
-    // --- Game Interface -------------------------------------------------
+    // ─── Game Interface ─────────────────────────────────────────────────
 
     /// @inheritdoc ILotto3DTreasury
     function collectSales(uint40 roundId, uint256 totalSales) external onlyRole(GAME_ROLE) whenNotPaused nonReentrant {
@@ -391,9 +391,10 @@ contract WusdLotto3DTreasury is
         _requireSolvent();
     }
 
-    // --- Admin ----------------------------------------------------------
+    // ─── Admin ──────────────────────────────────────────────────────────
 
     /// @notice Seed the accumulated pool (e.g. initial launch fund).
+    /// @dev 调用前 msg.sender 必须已对本合约执行 `ledgerContract.approveOperator`。
     function seedAccumulatedPool(uint256 amount) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
         if (amount == 0) revert ZeroAmount();
 
@@ -422,24 +423,24 @@ contract WusdLotto3DTreasury is
         emit OpsClaimed(msg.sender, amount);
     }
 
-    function settlePartnerReserve(bytes32 batchId, bytes32 attributionRoot, uint256 partnerPayable, uint256 wfFallback)
+    function claimPartnerReserve(bytes32 collectionId, bytes32 accountingRoot, uint256 amount)
         external
-        onlyRole(REVENUE_SETTLER_ROLE)
         whenNotPaused
         nonReentrant
     {
-        if (batchId == bytes32(0) || attributionRoot == bytes32(0)) revert InvalidPartnerBatch();
-        if (partnerBatchProcessed[batchId]) revert PartnerBatchAlreadyProcessed();
-        uint256 total = partnerPayable + wfFallback;
-        if (total == 0 || total > partnerReserveAccrued) revert InvalidPartnerBatch();
+        if (msg.sender != partnerPayoutSafe) revert OnlyPartnerPayoutSafe();
+        if (collectionId == bytes32(0) || accountingRoot == bytes32(0) || amount == 0) {
+            revert InvalidPartnerCollection();
+        }
+        if (partnerBatchProcessed[collectionId]) revert PartnerCollectionAlreadyProcessed();
+        if (amount > partnerReserveAccrued) revert InvalidPartnerCollection();
 
-        partnerBatchProcessed[batchId] = true;
-        partnerReserveAccrued -= total;
-        if (partnerPayable > 0) ledger.operatorTransfer(address(this), partnerPayoutSafe, partnerPayable);
-        if (wfFallback > 0) ledger.operatorTransfer(address(this), opsRecipient, wfFallback);
+        partnerBatchProcessed[collectionId] = true;
+        partnerReserveAccrued -= amount;
+        ledger.operatorTransfer(address(this), msg.sender, amount);
 
         _requireSolvent();
-        emit PartnerReserveSettled(batchId, attributionRoot, partnerPayable, wfFallback, partnerReserveAccrued);
+        emit PartnerReserveClaimed(collectionId, accountingRoot, amount, partnerReserveAccrued);
     }
 
     function reconcileLegacyAccounting(uint256 verifiedUnclaimedPrize) external onlyRole(ADMIN_ROLE) {

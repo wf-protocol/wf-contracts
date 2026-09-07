@@ -1,15 +1,16 @@
 # WF Contracts
 
-Core smart contracts for WF Protocol.
+Core smart contracts for the decentralized lottery protocol.
 
 ## Scope
 
-- WUSD ledger and stablecoin reserve
+- UnifiedLedger V2/V3/V4 and StablecoinReserve
 - Protocol game registry and revenue routing
-- Lotto3D game, treasury, and VRF adapter
+- World Lotto and Lotto3D games, treasuries, and Chainlink VRF adapters
 - World Lotto UMA rounds, treasury, settlement, and oracle adapter
+- Accumulated Partner revenue accounting and Safe-controlled collection
 
-Frontend applications, backend services, deployment records, private configuration, and unsupported games are intentionally excluded.
+Frontend applications, backend services, deployment records, private configuration, legacy game implementations, and disabled experimental markets are intentionally excluded.
 
 ## Build
 

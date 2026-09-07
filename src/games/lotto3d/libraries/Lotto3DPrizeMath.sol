@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev 原样移植自 lotto7-refactored/src/lotto3d/libraries/Lotto3DPrizeMath.sol，
+///      逻辑未作任何改动。3 位数字彩票号码匹配纯数学库，不涉及资金操作。
 library Lotto3DPrizeMath {
     uint16 internal constant NUMBER_MODULUS = 1000;
 

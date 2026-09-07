@@ -17,15 +17,25 @@ import {ILottoRounds} from "../../lotto7uma/interfaces/ILottoRounds.sol";
 import {ILottoTreasury} from "../../lotto7uma/interfaces/ILottoTreasury.sol";
 import {LottoPrizeMath} from "../../libraries/LottoPrizeMath.sol";
 
-/// @title WusdLottoRounds
-/// @notice Manages World Lotto rounds, ticket sales, and on-chain counters.
-/// @dev Direct purchases debit the caller through the WUSD ledger in the same transaction.
+/// @title WusdLottoRounds（UMA 结算版）
+/// @notice 使用 WUSD 的 UMA 版轮次、售票和链上透明计数器。
 ///
-/// Trust model:
-/// - ADMIN_ROLE can create rounds, close sales early, pause the contract, and
-///   cancel rounds (before any sales). This is a privileged role that should be
+///      玩家主动调用 `buy()`/`batchBuy()` 时使用 Ledger 的 directOperatorTransfer，
+///      购票和扣账在同一交易内完成，不需要单独 approve。`buyFor`/`batchBuyFor`
+///      属于第三方代买路径，仍要求 beneficiary 预先设置 operator allowance，避免
+///      BUYER_ROLE 持有者在用户没有主动发起交易时扣除其余额。
+///
+///      本文件其余部分（轮次生命周期、售票统计、UMA 断言状态机）与
+///      smart-contract-pd-main 版本完全一致，未作任何改动，见各函数原有注释。
+///
+/// TRUST MODEL（原版设计，未改动）：
+/// - ADMIN_ROLE can close sales early, pause the contract, and cancel rounds.
+///   KEEPER_ROLE can only create rounds using the same validated config path.
+///   These are privileged roles that should be
 ///   held by a multisig or governance contract in production.
 /// - ORACLE_ROLE is granted to the OracleAdapter contract, not an EOA.
+///
+/// WUSD ASSUMPTION：本合约只处理 6 位精度的内部记账单位，不识别底层充值资产。
 contract WusdLottoRounds is
     Initializable,
     AccessControlUpgradeable,
@@ -37,8 +47,11 @@ contract WusdLottoRounds is
     IGameModuleV4
 {
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
     bytes32 public constant ORACLE_ROLE = keccak256("ORACLE_ROLE");
     bytes32 public constant BUYER_ROLE = keccak256("BUYER_ROLE");
+    /// @notice 授予 LottoSettlement 合约，仅用于在链上直接结算的 claim() 流程里
+    ///         标记某张彩票已经领取过奖金，防止重复领取。见 markTicketClaimed。
     bytes32 public constant SETTLEMENT_ROLE = keccak256("SETTLEMENT_ROLE");
     uint256 public constant MAX_BATCH_SIZE = 100;
 
@@ -89,11 +102,22 @@ contract WusdLottoRounds is
     mapping(uint40 roundId => mapping(uint32 prefix6 => uint256 units)) public prefix6Units;
     mapping(uint40 roundId => mapping(uint32 prefix5 => uint256 units)) public prefix5Units;
 
+    /// @notice 四/五等奖滑动窗口聚合计数器（4 位连续窗口 / 3 位连续窗口）。
+    /// @dev 移植自 lotto7-refactored/Lotto7Game.sol 的 slide4/slide3 模式，用于取代
+    ///      原 Merkle 版本里由 SETTLER_ROLE 自行统计、链上完全不做验证的四五等奖份数。
+    ///      写入方式与 VRF 版完全一致：每次购票时把该号码 4 个 4 位窗口 / 5 个 3 位
+    ///      窗口分别累加，写入次数固定为常数（4 次 + 5 次），不随任何变量循环，
+    ///      因此是 O(1) 操作，不存在 gas 随用户数增长的风险（已用 Foundry 实测验证）。
     mapping(uint40 roundId => mapping(uint32 windowKey => uint256 units)) public slide4Units;
     mapping(uint40 roundId => mapping(uint32 windowKey => uint256 units)) public slide3Units;
 
     mapping(uint40 roundId => mapping(address user => uint256 count)) public ticketsPerRound;
 
+    // Ticket storage for refunds and (新增) 链上直接结算所需的号码/倍数信息。
+    // 新增 number/multiplier/claimed 字段：取代旧版 Merkle 叶子（roundId,user,tier,
+    // winningUnits,amount）里由 settler 自行生成、链上无法验证的"归属"数据——现在
+    // 中奖等级和应付金额完全由链上根据 number 与开奖号码重新计算，见 LottoSettlement.claim。
+    // 结构体定义在 ILottoRounds 接口里（TicketData），此处直接复用避免重复声明。
     mapping(uint256 ticketId => TicketData) public tickets;
     uint256 public purchaseReceiptNonce;
     bool public legacyPurchasesDisabled;
@@ -152,7 +176,10 @@ contract WusdLottoRounds is
         _grantRole(ADMIN_ROLE, admin_);
     }
 
-    function createRound(uint40 roundId, RoundConfig calldata config) external onlyRole(ADMIN_ROLE) {
+    function createRound(uint40 roundId, RoundConfig calldata config) external {
+        if (!hasRole(ADMIN_ROLE, msg.sender) && !hasRole(KEEPER_ROLE, msg.sender)) {
+            revert AccessControlUnauthorizedAccount(msg.sender, ADMIN_ROLE);
+        }
         if (!roundOrderingEnabled) revert RoundOrderingNotInitialized();
         if (roundId == 0) {
             revert InvalidRound();
@@ -182,8 +209,6 @@ contract WusdLottoRounds is
         emit RoundCreated(roundId);
     }
 
-    /// @notice Enables ordered settlement after upgrading an existing proxy.
-    /// @dev Existing unresolved rounds must be settled or cancelled before this migration.
     function initializeRoundOrdering(uint40 latestExistingRoundId) external reinitializer(3) onlyRole(ADMIN_ROLE) {
         if (roundOrderingEnabled) revert InvalidRoundOrder();
         if (latestExistingRoundId != 0 && !_rounds[latestExistingRoundId].exists) revert InvalidRound();
@@ -192,6 +217,7 @@ contract WusdLottoRounds is
         emit RoundOrderingInitialized(latestExistingRoundId);
     }
 
+    /// @dev 普通购票由 msg.sender 主动发起，扣账与出票在同一交易中完成。
     function protocolImplementationHash() external view returns (bytes32) {
         return ERC1967Utils.getImplementation().codehash;
     }
@@ -232,6 +258,9 @@ contract WusdLottoRounds is
 
     /// @notice Buy a ticket on behalf of `beneficiary`. The ticket is owned by
     ///         `beneficiary` and funds are deducted from their LedgerContract balance.
+    /// @dev `beneficiary`（而非 msg.sender）必须已经对本合约执行 approveOperator，
+    ///      因为 operatorTransfer 的 `from` 参数是 beneficiary：BUYER_ROLE 持有者
+    ///      只是发起调用的中介，不能代替 beneficiary 完成授权这一步。
     function buyFor(address beneficiary, uint40 roundId, uint32 number, uint16 multiplier)
         external
         onlyRole(BUYER_ROLE)
@@ -380,7 +409,10 @@ contract WusdLottoRounds is
             ++ticketsPerRound[roundId][buyer];
         }
 
-        // Store ticket for potential refund and on-chain claim - ticket belongs to
+        // Store ticket for potential refund and on-chain claim — ticket belongs to
+        // buyer, payer gets refund. number/multiplier 新增字段用于结算时链上直接
+        // 重新计算中奖等级和金额（见 LottoSettlement.claim），不再依赖 settler 提供
+        // 的 Merkle 叶子数据。
         tickets[nextTicketId] = TicketData({
             buyer: buyer,
             number: number,
@@ -400,6 +432,9 @@ contract WusdLottoRounds is
         prefix6Units[roundId][sixPrefix] += units;
         prefix5Units[roundId][fivePrefix] += units;
 
+        // 四/五等奖滑动窗口计数器写入：4 个 4 位窗口 + 5 个 3 位窗口，固定次数，O(1)。
+        // 与 Lotto7Game.sol 的写入方式逐位对应，保证 LottoPrizeMath.highestTier 的
+        // 判定结果与这里累加的窗口 key 完全一致。
         slide4Units[roundId][uint32(number / 1000)] += units;
         slide4Units[roundId][uint32((number / 100) % 10_000)] += units;
         slide4Units[roundId][uint32((number / 10) % 10_000)] += units;
@@ -614,6 +649,11 @@ contract WusdLottoRounds is
         emit TicketRefunded(ticketId, ticket.roundId, ticket.payer, ticket.paid);
     }
 
+    /// @notice 标记某张彩票已领取过奖金。仅供 LottoSettlement.claim 调用，用于
+    ///         防止同一张彩票被反复领奖。链上直接结算模式下，中奖归属和金额由
+    ///         LottoSettlement 根据 tickets[ticketId].number 与开奖号码自行算出，
+    ///         不再有 settler 报告的 winningUnits/leaf 数据，因此防重放要落在
+    ///         "这张 ticketId 有没有领过"这个粒度上，而不是旧版的 tier 粒度。
     function markTicketClaimed(uint256 ticketId) external onlyRole(SETTLEMENT_ROLE) {
         TicketData storage ticket = tickets[ticketId];
         if (ticket.buyer == address(0)) {

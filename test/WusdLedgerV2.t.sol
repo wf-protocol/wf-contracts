@@ -179,6 +179,7 @@ contract WusdLedgerV2Test is Test {
     function test_DirectReserveDonationActsAsUnencumberedWithdrawalLiquidity() public {
         _deposit(user, address(usdt), 20e6, 1);
 
+        // 额外 USDC 没有生成 WUSD 负债，是储备盈余。
         usdc.mint(address(reserve), 20e6);
         assertEq(reserve.accountedReserve(address(usdc)), 0);
         assertEq(reserve.totalRecognizedReserve(), 40e6);

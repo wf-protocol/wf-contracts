@@ -93,10 +93,8 @@ contract UnifiedLedgerV4 is UnifiedLedgerV3, IUnifiedLedgerV4 {
         if (hasOrderId) usedWfOrderIds[request.wfOrderId] = true;
         _moveBalance(address(this), request.owner, config.treasury, request.amount);
 
-        IGameModuleV4.PurchaseContext memory context = IGameModuleV4.PurchaseContext({
-            wfOrderId: request.wfOrderId,
-            partnerCode: request.partnerCode
-        });
+        IGameModuleV4.PurchaseContext memory context =
+            IGameModuleV4.PurchaseContext({wfOrderId: request.wfOrderId, partnerCode: request.partnerCode});
         uint32 allocationVersion;
         uint16 partnerBps;
         (receiptId, allocationVersion, partnerBps) = IGameModuleV4(request.game)

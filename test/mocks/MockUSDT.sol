@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @title MockUSDT
+/// @notice 测试用 ERC20，模拟 USDT 的 6 位小数精度。
 contract MockUSDT is ERC20 {
     constructor() ERC20("Mock USDT", "USDT") {}
 

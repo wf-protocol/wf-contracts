@@ -17,6 +17,8 @@ import {ILotto3DGame} from "../../lotto3d/interfaces/ILotto3DGame.sol";
 import {Lotto3DPrizeMath} from "../../lotto3d/libraries/Lotto3DPrizeMath.sol";
 
 /// @title WusdLotto3DGame
+/// @notice 使用统一 WUSD 内部余额的 3D 彩票状态机。
+/// @dev 不持有或识别 USDT/USDC 地址；购票、派奖和退款均为 WUSD Ledger 内部转账。
 contract WusdLotto3DGame is
     Initializable,
     UUPSUpgradeable,
@@ -29,12 +31,12 @@ contract WusdLotto3DGame is
 {
     using Lotto3DPrizeMath for uint16;
 
-    // --- Roles ----------------------------------------------------------
+    // ─── Roles ──────────────────────────────────────────────────────────
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant VRF_ROLE = keccak256("VRF_ROLE");
     bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
 
-    // --- Constants ------------------------------------------------------
+    // ─── Constants ──────────────────────────────────────────────────────
     uint256 public constant MAX_TICKETS_PER_ADDRESS = 10;
     uint256 public constant MAX_BATCH_SIZE = 100;
     uint256 public constant RELEASE_INTERVAL = 10;
@@ -44,7 +46,7 @@ contract WusdLotto3DGame is
     uint256 public constant BPS_BASE = 10000;
     uint64 public constant DEFAULT_CLAIM_PERIOD = 90 days;
 
-    // --- Errors ---------------------------------------------------------
+    // ─── Errors ─────────────────────────────────────────────────────────
     error ZeroAddress();
     error ZeroAmount();
     error InvalidRound();
@@ -74,7 +76,7 @@ contract WusdLotto3DGame is
     error InvalidRoundOrder();
     error PreviousRoundUnresolved(uint40 previousRoundId);
 
-    // --- Structs --------------------------------------------------------
+    // ─── Structs ────────────────────────────────────────────────────────
     struct TicketData {
         address buyer;
         uint40 roundId;
@@ -83,7 +85,7 @@ contract WusdLotto3DGame is
         bool refunded;
     }
 
-    // --- State ----------------------------------------------------------
+    // ─── State ──────────────────────────────────────────────────────────
     IUnifiedLedgerV2 public ledger;
     IWusdLotto3DTreasury public treasury;
     uint256 public ticketPrice;
@@ -117,7 +119,7 @@ contract WusdLotto3DGame is
     event RoundClaimsExpired(uint40 indexed roundId, uint256 recycledAmount);
     event RoundOrderingInitialized(uint40 indexed latestExistingRoundId, uint40 existingRoundCount);
 
-    // --- Initializer ----------------------------------------------------
+    // ─── Initializer ────────────────────────────────────────────────────
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -146,9 +148,12 @@ contract WusdLotto3DGame is
         _grantRole(ADMIN_ROLE, admin_);
     }
 
-    // --- Round Management -----------------------------------------------
+    // ─── Round Management ───────────────────────────────────────────────
 
-    function createRound(uint40 roundId, RoundConfig calldata config) external onlyRole(ADMIN_ROLE) {
+    function createRound(uint40 roundId, RoundConfig calldata config) external {
+        if (!hasRole(ADMIN_ROLE, msg.sender) && !hasRole(KEEPER_ROLE, msg.sender)) {
+            revert AccessControlUnauthorizedAccount(msg.sender, ADMIN_ROLE);
+        }
         if (!roundOrderingEnabled) revert RoundOrderingNotInitialized();
         if (roundId == 0) revert InvalidRound();
         if (roundId <= latestRoundId) revert InvalidRoundOrder();
@@ -172,8 +177,6 @@ contract WusdLotto3DGame is
         emit RoundCreated(roundId, config.salesOpenTime, config.salesCloseTime);
     }
 
-    /// @notice Enables ordered settlement after upgrading an existing proxy.
-    /// @dev Existing unresolved rounds must be settled or cancelled before this migration.
     function initializeRoundOrdering(uint40 latestExistingRoundId, uint40 existingRoundCount)
         external
         reinitializer(3)
@@ -187,7 +190,7 @@ contract WusdLotto3DGame is
         emit RoundOrderingInitialized(latestExistingRoundId, existingRoundCount);
     }
 
-    // --- Ticket Purchase ------------------------------------------------
+    // ─── Ticket Purchase ────────────────────────────────────────────────
 
     function protocolImplementationHash() external view returns (bytes32) {
         return ERC1967Utils.getImplementation().codehash;
@@ -358,7 +361,7 @@ contract WusdLotto3DGame is
         emit TicketPurchased(ticketId, roundId, buyer, number);
     }
 
-    // --- Sales Close ----------------------------------------------------
+    // ─── Sales Close ────────────────────────────────────────────────────
 
     function closeSales(uint40 roundId) external {
         RoundData storage rd = _rounds[roundId];
@@ -373,7 +376,7 @@ contract WusdLotto3DGame is
         emit SalesClosed(roundId);
     }
 
-    // --- Settlement (called by VRF Adapter) -----------------------------
+    // ─── Settlement (called by VRF Adapter) ─────────────────────────────
 
     /// @inheritdoc ILotto3DGame
     function settleDraw(uint40 roundId, uint16 winningNumber) external onlyRole(VRF_ROLE) nonReentrant {
@@ -460,7 +463,7 @@ contract WusdLotto3DGame is
         );
     }
 
-    // --- Claim ----------------------------------------------------------
+    // ─── Claim ──────────────────────────────────────────────────────────
 
     function claim(uint256 ticketId) external nonReentrant {
         TicketData storage ticket = tickets[ticketId];
@@ -550,13 +553,16 @@ contract WusdLotto3DGame is
         emit PrizeClaimed(ticketId, ticket.roundId, msg.sender, tier, amount);
     }
 
-    // --- Cancel & Refund ------------------------------------------------
+    // ─── Cancel & Refund ────────────────────────────────────────────────
 
     function cancelRound(uint40 roundId) external onlyRole(ADMIN_ROLE) {
         _cancelRound(roundId);
     }
 
-    function cancelTimedOutRound(uint40 roundId) external onlyRole(VRF_ROLE) {
+    function cancelTimedOutRound(uint40 roundId) external {
+        if (!hasRole(VRF_ROLE, msg.sender) && !hasRole(KEEPER_ROLE, msg.sender)) {
+            revert AccessControlUnauthorizedAccount(msg.sender, VRF_ROLE);
+        }
         RoundData storage rd = _rounds[roundId];
         if (!rd.exists) revert InvalidRound();
         if (block.timestamp <= rd.config.drawDeadline) revert SalesNotClosed();
@@ -592,7 +598,7 @@ contract WusdLotto3DGame is
         emit TicketRefunded(ticketId, ticket.roundId, ticket.buyer, ticketPrice);
     }
 
-    // --- View -----------------------------------------------------------
+    // ─── View ───────────────────────────────────────────────────────────
 
     function getRound(uint40 roundId) external view returns (RoundData memory) {
         return _rounds[roundId];
@@ -608,7 +614,7 @@ contract WusdLotto3DGame is
         emit RoundClaimsExpired(roundId, recycledAmount);
     }
 
-    // --- Internal Helpers -----------------------------------------------
+    // ─── Internal Helpers ───────────────────────────────────────────────
 
     function _computeTier2PairOvercount(
         uint40 roundId,
@@ -641,7 +647,7 @@ contract WusdLotto3DGame is
         }
     }
 
-    // --- Admin ----------------------------------------------------------
+    // ─── Admin ──────────────────────────────────────────────────────────
 
     function pause() external onlyRole(ADMIN_ROLE) {
         _pause();

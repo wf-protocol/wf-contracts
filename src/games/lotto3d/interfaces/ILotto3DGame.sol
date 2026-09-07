@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+/// @dev 原样移植自 lotto7-refactored/src/lotto3d/interfaces/ILotto3DGame.sol，结构未作改动。
 interface ILotto3DGame {
     enum RoundStatus {
         None,

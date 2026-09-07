@@ -14,17 +14,30 @@ import {RevenueAllocationLib} from "../../../protocol/RevenueAllocationLib.sol";
 import {ILottoTreasury} from "../../lotto7uma/interfaces/ILottoTreasury.sol";
 import {IWusdLottoUmaRevenueTreasury} from "./IWusdLottoUmaRevenueTreasury.sol";
 
-/// @title WusdLottoTreasury
-/// @notice Manages the World Lotto carry pool, reserves, revenue, and prize payouts.
-/// @dev The ledger administrator must register the treasury and rounds contracts.
-///      Fund sources must approve the appropriate contract before transferring WUSD.
+/// @title WusdLottoTreasury（UMA 结算版）
+/// @notice 使用 WUSD 管理 UMA 版统一滚存池、准备金、收入和派奖。
 ///
-/// Carry model:
+///      安全模型：业务合约必须先由 WUSD Ledger 管理员注册；资金来源地址还必须对
+///      业务合约设置足够额度。Treasury 自有资金的转出额度在代理部署完成后通过
+///      `syncLedgerAllowance()` 建立，避免代理构造期 msg.sender 归属错误。
+///
+///      部署/运维前必须完成的一步（由 LedgerContract 的 Admin_Account 执行）：
+///      - `ledgerContract.registerOperator(address(lottoTreasury))`
+///      - `ledgerContract.registerOperator(address(lottoRounds))`（见 LottoRounds.sol）
+///      资金来源方自己需要执行的一步：
+///      - 玩家：在 `LottoRounds.buy()` 之前，调用
+///        `ledger.approveOperator(address(lottoRounds), amount)`
+///      - 储备/奖池注资人：在 `depositReserve()`/`seedCarryPool()` 之前，调用
+///        `ledger.approveOperator(address(lottoTreasury), amount)`
+///
+/// CARRY MODEL (unified pool)（原版设计，未改动）：
 /// - A single `carryPool` accumulates all unawarded floating-tier prize money.
 /// - Each settlement, `LottoSettlement` splits the pool into per-tier
 ///   allocations (50/30/20), computes payouts, and applies the next carryPool.
 /// - The settlement contract enforces the payout formula from on-chain ticket
 ///   counters; this treasury enforces liability accounting and overflow rules.
+///
+/// WUSD ASSUMPTION：本合约只处理 6 位精度的内部记账单位，不识别底层充值资产。
 contract WusdLottoTreasury is
     Initializable,
     AccessControlUpgradeable,
@@ -58,8 +71,9 @@ contract WusdLottoTreasury is
     error RoundAllocationAlreadySnapshotted();
     error RoundAllocationNotSnapshotted();
     error RevenueAlreadyFinalized();
-    error PartnerBatchAlreadyProcessed();
-    error InvalidPartnerBatch();
+    error PartnerCollectionAlreadyProcessed();
+    error InvalidPartnerCollection();
+    error OnlyPartnerPayoutSafe();
 
     IUnifiedLedgerV2 public ledger;
     uint256 public tokenUnit;
@@ -67,7 +81,7 @@ contract WusdLottoTreasury is
     uint256 public reserveBalance;
     uint256 public claimsPaid;
 
-    /// @notice Unified carry pool - all unawarded floating-tier prize money.
+    /// @notice Unified carry pool — all unawarded floating-tier prize money.
     uint256 public carryPool;
 
     /// @notice Maximum carry pool size. Excess is redirected to fund. 0 = no cap.
@@ -132,12 +146,8 @@ contract WusdLottoTreasury is
         uint256 partnerAmount,
         uint256 opsAmount
     );
-    event PartnerReserveSettled(
-        bytes32 indexed batchId,
-        bytes32 indexed attributionRoot,
-        uint256 partnerPayable,
-        uint256 wfFallback,
-        uint256 reserveRemaining
+    event PartnerReserveClaimed(
+        bytes32 indexed collectionId, bytes32 indexed accountingRoot, uint256 amount, uint256 reserveRemaining
     );
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -176,6 +186,8 @@ contract WusdLottoTreasury is
         _grantRole(FUND_ROLE, fund_);
     }
 
+    /// @notice 在代理部署完成后，为 Treasury 自有 WUSD 建立支出额度。
+    /// @dev 不可放在代理构造期的 initializer 中；构造期跨合约调用的 msg.sender 是部署者。
     function syncLedgerAllowance() external onlyRole(ADMIN_ROLE) {
         ledger.approveOperator(address(this), type(uint256).max);
     }
@@ -266,7 +278,9 @@ contract WusdLottoTreasury is
         );
     }
 
-    /// @dev The caller must approve this treasury as a ledger operator first.
+    /// @dev 调用前 msg.sender 必须已对本合约执行
+    ///      `ledger.approveOperator(address(lottoTreasury), amount)`，
+    ///      否则本函数内部的 operatorTransfer 会以 ExceedsOperatorAllowance revert。
     function depositReserve(uint256 amount) external whenNotPaused nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
@@ -281,6 +295,8 @@ contract WusdLottoTreasury is
 
     /// @notice Inject funds directly into the carry pool (prize pool).
     ///         Used for initial seeding (e.g. a 2M WUSD launch fund).
+    /// @dev 调用方（onlyRole(ADMIN_ROLE)）同样必须提前对本合约执行 approveOperator，
+    ///      管理员身份不豁免用户侧授权这一层防御。
     function seedCarryPool(uint256 amount) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
@@ -421,6 +437,23 @@ contract WusdLottoTreasury is
         _requireSolvent();
     }
 
+    /// @notice 把"曾经为四五等奖预留、但因为该份额实际被更高等级（一二三等奖）
+    ///         领走而从未真正以四五等奖名义派发"的金额，重新计入统一奖池滚存。
+    /// @dev 修复本次全链上结算改造中发现的记账 bug：`LottoSettlement.postSettlement`
+    ///      的 `fixedReserve`（四五等奖预留金额）是根据 `slide4Units`/`slide3Units`
+    ///      滑动窗口聚合计数器算出来的，而这些计数器对"同一张票"是无差别累加的——
+    ///      一张一等奖（tier1）中奖票，它的号码天然会落在自己的全部 4 位/3 位窗口
+    ///      里，所以会被同时计入 winUnits1（正确）和 winUnits4/winUnits5（重复计入）。
+    ///      这部分被重复预留、但玩家在 `LottoSettlement.claim` 里只会按最高等级
+    ///      （tier1）领取一次的资金，如果不显式处理，会永久留在 Treasury 的账本余额
+    ///      里，成为任何现有函数都无法再取出的死钱（不是被偷，但也用不了）。
+    ///
+    ///      纯记账操作：资金从未真正离开 Treasury（`fixedReserve` 只是从
+    ///      `prizePool` 里"划出"用于计算 `floatPool`，不涉及任何 `operatorTransfer`
+    ///      资金转移），所以这里也不需要转账，只需要把这部分金额重新计入
+    ///      `carryPool`，让它在下一轮结算时能够被正常分配出去。与 VRF 版
+    ///      `Lotto7Game.claim` 里 `_calcForfeitedFixed` + `setJackpots(j1+recycled,...)`
+    ///      的回收机制是同一个模式，只是这里统一奖池模型下直接加进 `carryPool`。
     function recycleToCarryPool(uint256 amount) external onlyRole(SETTLEMENT_ROLE) whenNotPaused nonReentrant {
         if (amount == 0) {
             return;
@@ -513,7 +546,7 @@ contract WusdLottoTreasury is
         emit RefundPaid(to, amount);
     }
 
-    // --- Revenue Claims ------------------------------------------------
+    // ─── Revenue Claims ────────────────────────────────────────────────
 
     /// @notice Claim accrued ops revenue. Only OPS_ROLE holders can call.
     function claimOps() external onlyRole(OPS_ROLE) whenNotPaused nonReentrant {
@@ -548,24 +581,24 @@ contract WusdLottoTreasury is
         emit FundClaimed(msg.sender, amount);
     }
 
-    function settlePartnerReserve(bytes32 batchId, bytes32 attributionRoot, uint256 partnerPayable, uint256 wfFallback)
+    function claimPartnerReserve(bytes32 collectionId, bytes32 accountingRoot, uint256 amount)
         external
-        onlyRole(REVENUE_SETTLER_ROLE)
         whenNotPaused
         nonReentrant
     {
-        if (batchId == bytes32(0) || attributionRoot == bytes32(0)) revert InvalidPartnerBatch();
-        if (partnerBatchProcessed[batchId]) revert PartnerBatchAlreadyProcessed();
-        uint256 total = partnerPayable + wfFallback;
-        if (total == 0 || total > partnerReserveAccrued) revert InvalidPartnerBatch();
+        if (msg.sender != partnerPayoutSafe) revert OnlyPartnerPayoutSafe();
+        if (collectionId == bytes32(0) || accountingRoot == bytes32(0) || amount == 0) {
+            revert InvalidPartnerCollection();
+        }
+        if (partnerBatchProcessed[collectionId]) revert PartnerCollectionAlreadyProcessed();
+        if (amount > partnerReserveAccrued) revert InvalidPartnerCollection();
 
-        partnerBatchProcessed[batchId] = true;
-        partnerReserveAccrued -= total;
-        if (partnerPayable > 0) ledger.operatorTransfer(address(this), partnerPayoutSafe, partnerPayable);
-        if (wfFallback > 0) ledger.operatorTransfer(address(this), opsRecipient, wfFallback);
+        partnerBatchProcessed[collectionId] = true;
+        partnerReserveAccrued -= amount;
+        ledger.operatorTransfer(address(this), msg.sender, amount);
 
         _requireSolvent();
-        emit PartnerReserveSettled(batchId, attributionRoot, partnerPayable, wfFallback, partnerReserveAccrued);
+        emit PartnerReserveClaimed(collectionId, accountingRoot, amount, partnerReserveAccrued);
     }
 
     function _claimableRevenue() internal view returns (uint256) {
