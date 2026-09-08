@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @dev 原样移植自 lotto7-refactored/src/lotto3d/interfaces/ILotto3DTreasury.sol，
-///      接口签名未作改动（底层资金托管方式改为 LedgerContract，见实现文件注释）。
 interface ILotto3DTreasury {
-    /// @notice Record sales revenue and split into pools (50/30/20).
+    /// @notice Convert reserved sales into this round's snapshotted revenue allocation.
     function collectSales(uint40 roundId, uint256 totalSales) external;
 
     /// @notice Get the current prize pool for a round after settlement.
     function settleRoundPrize(uint40 roundId, bool isReleaseRound) external returns (uint256 prizePool);
-
-    /// @notice Pay a claim to a winner.
-    function payClaim(address to, uint256 amount) external;
-
-    /// @notice Pay multiple claims to the same winner with one ledger transfer.
-    function payClaimBatch(address to, uint256 amount) external;
 
     /// @notice Pay a refund for a cancelled round.
     function payRefund(address to, uint256 amount) external;

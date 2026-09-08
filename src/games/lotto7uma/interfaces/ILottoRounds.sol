@@ -101,13 +101,4 @@ interface ILottoRounds {
     function clearPendingAssertionForRetry(uint40 roundId, bytes32 assertionId) external;
 
     function submitDraw(uint40 roundId, uint32 winningNumber, bytes32 sourceBundleHash) external;
-
-    function buy(uint40 roundId, uint32 number, uint16 multiplier) external;
-
-    function batchBuy(uint40 roundId, uint32[] calldata numbers, uint16[] calldata multipliers) external;
-
-    function buyFor(address beneficiary, uint40 roundId, uint32 number, uint16 multiplier) external;
-
-    function batchBuyFor(address beneficiary, uint40 roundId, uint32[] calldata numbers, uint16[] calldata multipliers)
-        external;
 }

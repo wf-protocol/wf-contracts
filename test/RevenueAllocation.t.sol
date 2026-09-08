@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {GameRegistry} from "../src/protocol/GameRegistry.sol";
+import {IGameRegistry} from "../src/protocol/IGameRegistry.sol";
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {DatRevenueVault} from "../src/protocol/DatRevenueVault.sol";
 import {IProtocolRevenueRouter} from "../src/protocol/IProtocolRevenueRouter.sol";
 import {ProtocolRevenueRouter} from "../src/protocol/ProtocolRevenueRouter.sol";
-import {UnifiedLedgerV2} from "../src/wusd/UnifiedLedgerV2.sol";
+import {UnifiedLedgerV4} from "../src/wusd/UnifiedLedgerV4.sol";
 
 contract RevenueAllocationTest is Test {
     uint256 internal constant UNIT = 1e6;
@@ -17,15 +19,16 @@ contract RevenueAllocationTest is Test {
     address internal stranger = address(0xBAD);
 
     ProtocolRevenueRouter internal router;
-    UnifiedLedgerV2 internal ledger;
+    UnifiedLedgerV4 internal ledger;
     DatRevenueVault internal vault;
 
     function setUp() public {
         router = new ProtocolRevenueRouter(governance, 8000, 0, 500, 1500);
-        ledger = UnifiedLedgerV2(
+        ledger = UnifiedLedgerV4(
             address(
                 new ERC1967Proxy(
-                    address(new UnifiedLedgerV2()), abi.encodeCall(UnifiedLedgerV2.initialize, (governance))
+                    address(new UnifiedLedgerV4()),
+                    abi.encodeCall(UnifiedLedgerV4.initialize, (governance, IGameRegistry(address(new GameRegistry()))))
                 )
             )
         );
@@ -33,10 +36,9 @@ contract RevenueAllocationTest is Test {
 
         vm.startPrank(governance);
         ledger.grantRole(ledger.RESERVE_ROLE(), governance);
-        ledger.registerOperator(address(vault));
+        ledger.grantRole(ledger.PROTOCOL_ACCOUNT_ROLE(), address(vault));
         ledger.creditFromReserve(address(vault), 100 * UNIT);
         vm.stopPrank();
-        vault.syncLedgerAllowance();
     }
 
     function test_InitialAndUpdatedAllocationsAreVersionedAndImmutable() public {

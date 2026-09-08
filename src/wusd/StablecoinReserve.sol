@@ -13,10 +13,10 @@ import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/crypt
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-import {IUnifiedLedgerV2} from "./IUnifiedLedgerV2.sol";
+import {IUnifiedLedgerV4} from "./IUnifiedLedgerV4.sol";
 
 /// @title StablecoinReserve
-/// @notice 托管真实稳定币，并在充值/提现时与 UnifiedLedgerV2 的 WUSD 总负债同步变化。
+/// @notice 托管真实稳定币，并在充值/提现时与 UnifiedLedgerV4 的 WUSD 总负债同步变化。
 contract StablecoinReserve is
     Initializable,
     UUPSUpgradeable,
@@ -55,7 +55,7 @@ contract StablecoinReserve is
         uint192 accumulated;
     }
 
-    IUnifiedLedgerV2 public ledger;
+    IUnifiedLedgerV4 public ledger;
     address public signer;
 
     mapping(address token => AssetConfig config) public assetConfigs;
@@ -121,7 +121,7 @@ contract StablecoinReserve is
         _disableInitializers();
     }
 
-    function initialize(address admin, IUnifiedLedgerV2 ledger_, address signer_) external initializer {
+    function initialize(address admin, IUnifiedLedgerV4 ledger_, address signer_) external initializer {
         if (admin == address(0) || address(ledger_) == address(0) || signer_ == address(0)) revert ZeroAddress();
 
         __AccessControl_init();

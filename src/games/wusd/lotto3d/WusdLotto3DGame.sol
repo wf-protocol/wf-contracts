@@ -8,8 +8,7 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
-import {IUnifiedLedgerV2} from "../../../wusd/IUnifiedLedgerV2.sol";
-import {IGameModuleV3} from "../../../protocol/IGameModuleV3.sol";
+import {IUnifiedLedgerV4} from "../../../wusd/IUnifiedLedgerV4.sol";
 import {IGameModuleV4} from "../../../protocol/IGameModuleV4.sol";
 import {IRevenueAllocationTreasury} from "../../../protocol/IRevenueAllocationTreasury.sol";
 import {IWusdLotto3DTreasury} from "./IWusdLotto3DTreasury.sol";
@@ -26,7 +25,6 @@ contract WusdLotto3DGame is
     PausableUpgradeable,
     ReentrancyGuard,
     ILotto3DGame,
-    IGameModuleV3,
     IGameModuleV4
 {
     using Lotto3DPrizeMath for uint16;
@@ -67,12 +65,9 @@ contract WusdLotto3DGame is
     error OnlyLedger();
     error PurchaseAmountMismatch();
     error UnsupportedBeneficiary();
-    error LegacyPurchasesAreDisabled();
     error PrizeClaimExpired(uint40 roundId);
     error ClaimPeriodOutOfRange();
-    error RevenueAlreadyActive();
     error InvalidRevenueAllocation();
-    error RoundOrderingNotInitialized();
     error InvalidRoundOrder();
     error PreviousRoundUnresolved(uint40 previousRoundId);
 
@@ -86,7 +81,7 @@ contract WusdLotto3DGame is
     }
 
     // ─── State ──────────────────────────────────────────────────────────
-    IUnifiedLedgerV2 public ledger;
+    IUnifiedLedgerV4 public ledger;
     IWusdLotto3DTreasury public treasury;
     uint256 public ticketPrice;
     uint256 public nextTicketId;
@@ -99,25 +94,20 @@ contract WusdLotto3DGame is
     mapping(uint40 roundId => mapping(uint16 comboKey => uint256 units)) public comboUnits;
     mapping(uint40 roundId => mapping(uint16 pairKey => uint256 units)) public pairUnits;
     uint256 public purchaseReceiptNonce;
-    bool public legacyPurchasesDisabled;
     uint64 public claimPeriod;
     mapping(uint40 roundId => uint64 period) public roundClaimPeriodSnapshot;
     mapping(uint40 roundId => uint64 deadline) public roundClaimDeadline;
     mapping(uint40 roundId => bool enabled) public liabilityAccountingEnabled;
-    bool public revenueAllocationEnabled;
     uint40 public latestRoundId;
     uint40 public roundSequenceCount;
     mapping(uint40 roundId => uint40 previous) public previousRoundId;
     mapping(uint40 roundId => uint40 sequence) public roundSequence;
-    bool public roundOrderingEnabled;
 
     event LedgerPurchase(
         bytes32 indexed receiptId, uint40 indexed roundId, address indexed payer, address beneficiary, uint256 amount
     );
-    event LegacyPurchasesPermanentlyDisabled();
     event ClaimPeriodUpdated(uint64 previousPeriod, uint64 newPeriod);
     event RoundClaimsExpired(uint40 indexed roundId, uint256 recycledAmount);
-    event RoundOrderingInitialized(uint40 indexed latestExistingRoundId, uint40 existingRoundCount);
 
     // ─── Initializer ────────────────────────────────────────────────────
 
@@ -126,7 +116,7 @@ contract WusdLotto3DGame is
         _disableInitializers();
     }
 
-    function initialize(address admin_, IUnifiedLedgerV2 ledger_, IWusdLotto3DTreasury treasury_, uint256 ticketPrice_)
+    function initialize(address admin_, IUnifiedLedgerV4 ledger_, IWusdLotto3DTreasury treasury_, uint256 ticketPrice_)
         public
         initializer
     {
@@ -142,7 +132,6 @@ contract WusdLotto3DGame is
         treasury = treasury_;
         ticketPrice = ticketPrice_;
         claimPeriod = DEFAULT_CLAIM_PERIOD;
-        roundOrderingEnabled = true;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
@@ -154,7 +143,6 @@ contract WusdLotto3DGame is
         if (!hasRole(ADMIN_ROLE, msg.sender) && !hasRole(KEEPER_ROLE, msg.sender)) {
             revert AccessControlUnauthorizedAccount(msg.sender, ADMIN_ROLE);
         }
-        if (!roundOrderingEnabled) revert RoundOrderingNotInitialized();
         if (roundId == 0) revert InvalidRound();
         if (roundId <= latestRoundId) revert InvalidRoundOrder();
         if (_rounds[roundId].exists) revert RoundAlreadyExists();
@@ -162,7 +150,7 @@ contract WusdLotto3DGame is
             revert InvalidConfig();
         }
 
-        if (revenueAllocationEnabled) treasury.snapshotRoundAllocation(roundId);
+        treasury.snapshotRoundAllocation(roundId);
 
         RoundData storage rd = _rounds[roundId];
         rd.exists = true;
@@ -177,48 +165,10 @@ contract WusdLotto3DGame is
         emit RoundCreated(roundId, config.salesOpenTime, config.salesCloseTime);
     }
 
-    function initializeRoundOrdering(uint40 latestExistingRoundId, uint40 existingRoundCount)
-        external
-        reinitializer(3)
-        onlyRole(ADMIN_ROLE)
-    {
-        if (roundOrderingEnabled) revert InvalidRoundOrder();
-        if (latestExistingRoundId != 0 && !_rounds[latestExistingRoundId].exists) revert InvalidRound();
-        latestRoundId = latestExistingRoundId;
-        roundSequenceCount = existingRoundCount;
-        roundOrderingEnabled = true;
-        emit RoundOrderingInitialized(latestExistingRoundId, existingRoundCount);
-    }
-
     // ─── Ticket Purchase ────────────────────────────────────────────────
 
     function protocolImplementationHash() external view returns (bytes32) {
         return ERC1967Utils.getImplementation().codehash;
-    }
-
-    function initializeRevenueV4(uint40 firstRoundId) external reinitializer(2) onlyRole(ADMIN_ROLE) {
-        RoundData storage rd = _rounds[firstRoundId];
-        if (!rd.exists || rd.status != RoundStatus.Open || rd.totalSales != 0) revert RevenueAlreadyActive();
-        treasury.snapshotRoundAllocation(firstRoundId);
-        revenueAllocationEnabled = true;
-    }
-
-    function buy(uint40 roundId, uint16 number) external whenNotPaused nonReentrant {
-        if (legacyPurchasesDisabled) revert LegacyPurchasesAreDisabled();
-        _buy(msg.sender, roundId, number);
-    }
-
-    function batchBuy(uint40 roundId, uint16[] calldata numbers) external whenNotPaused nonReentrant {
-        if (legacyPurchasesDisabled) revert LegacyPurchasesAreDisabled();
-        RoundData storage rd = _validatePurchase(msg.sender, roundId, numbers);
-
-        for (uint256 i = 0; i < numbers.length; i++) {
-            _recordTicket(msg.sender, roundId, numbers[i], rd);
-        }
-
-        // One zero-sum Ledger transfer funds the complete batch. A failure
-        // reverts every ticket recorded above.
-        ledger.directOperatorTransfer(msg.sender, address(treasury), ticketPrice * numbers.length);
     }
 
     function quotePurchase(address, address beneficiary, bytes calldata purchaseData)
@@ -229,29 +179,6 @@ contract WusdLotto3DGame is
         (uint40 roundId, uint16[] memory numbers) = abi.decode(purchaseData, (uint40, uint16[]));
         _validatePurchase(beneficiary, roundId, numbers);
         amount = ticketPrice * numbers.length;
-    }
-
-    function purchaseFromLedger(address payer, address beneficiary, uint256 amount, bytes calldata purchaseData)
-        external
-        nonReentrant
-        whenNotPaused
-        returns (bytes32 receiptId)
-    {
-        if (msg.sender != address(ledger)) revert OnlyLedger();
-        if (payer != beneficiary) revert UnsupportedBeneficiary();
-
-        (uint40 roundId, uint16[] memory numbers) = abi.decode(purchaseData, (uint40, uint16[]));
-        RoundData storage rd = _validatePurchase(beneficiary, roundId, numbers);
-        uint256 expectedAmount = ticketPrice * numbers.length;
-        if (amount != expectedAmount) revert PurchaseAmountMismatch();
-
-        for (uint256 i = 0; i < numbers.length; i++) {
-            _recordTicket(beneficiary, roundId, numbers[i], rd);
-        }
-
-        uint256 receiptNonce = ++purchaseReceiptNonce;
-        receiptId = keccak256(abi.encode(address(this), roundId, payer, beneficiary, amount, receiptNonce));
-        emit LedgerPurchase(receiptId, roundId, payer, beneficiary, amount);
     }
 
     function purchaseFromLedgerV4(
@@ -274,6 +201,7 @@ contract WusdLotto3DGame is
             _recordTicket(beneficiary, roundId, numbers[i], rd);
         }
 
+        treasury.reserveForRefund(amount);
         uint256 receiptNonce = ++purchaseReceiptNonce;
         receiptId = keccak256(
             abi.encode(
@@ -298,22 +226,8 @@ contract WusdLotto3DGame is
         view
         returns (IRevenueAllocationTreasury.RoundRevenueAllocation memory allocation_)
     {
-        if (!revenueAllocationEnabled) revert InvalidRevenueAllocation();
         allocation_ = treasury.roundRevenueAllocation(roundId);
         if (!allocation_.snapshotted) revert InvalidRevenueAllocation();
-    }
-
-    function _buy(address buyer, uint40 roundId, uint16 number) internal {
-        RoundData storage rd = _rounds[roundId];
-        if (!rd.exists || rd.status != RoundStatus.Open) revert RoundNotOpen();
-        if (block.timestamp < rd.config.salesOpenTime || block.timestamp > rd.config.salesCloseTime) {
-            revert RoundNotOpen();
-        }
-        if (!Lotto3DPrizeMath.isValidNumber(number)) revert InvalidNumber();
-        if (ticketsPerAddress[roundId][buyer] >= MAX_TICKETS_PER_ADDRESS) revert MaxTicketsReached();
-
-        _recordTicket(buyer, roundId, number, rd);
-        ledger.directOperatorTransfer(buyer, address(treasury), ticketPrice);
     }
 
     function _validatePurchase(address buyer, uint40 roundId, uint16[] memory numbers)
@@ -380,7 +294,6 @@ contract WusdLotto3DGame is
 
     /// @inheritdoc ILotto3DGame
     function settleDraw(uint40 roundId, uint16 winningNumber) external onlyRole(VRF_ROLE) nonReentrant {
-        if (!roundOrderingEnabled) revert RoundOrderingNotInitialized();
         RoundData storage rd = _rounds[roundId];
         if (!rd.exists) revert InvalidRound();
         if (rd.status == RoundStatus.Settled) revert RoundAlreadySettled();
@@ -486,11 +399,7 @@ contract WusdLotto3DGame is
         if (amount == 0) revert NoPrize();
 
         ticket.claimed = true;
-        if (liabilityAccountingEnabled[ticket.roundId]) {
-            treasury.payRoundClaim(ticket.roundId, msg.sender, amount);
-        } else {
-            treasury.payClaim(msg.sender, amount);
-        }
+        treasury.payRoundClaim(ticket.roundId, msg.sender, amount);
 
         emit PrizeClaimed(ticketId, ticket.roundId, msg.sender, tier, amount);
     }
@@ -500,20 +409,15 @@ contract WusdLotto3DGame is
         if (ticketIds.length == 0) revert ZeroAmount();
         if (ticketIds.length > MAX_TICKETS_PER_ADDRESS) revert MaxTicketsReached();
 
-        uint256 legacyAmount;
         uint40[] memory roundIds = new uint40[](ticketIds.length);
         uint256[] memory amounts = new uint256[](ticketIds.length);
         uint256 roundClaimCount;
         for (uint256 i = 0; i < ticketIds.length; i++) {
             (uint40 roundId, uint256 amount) = _claimInternal(ticketIds[i]);
             if (amount == 0) continue;
-            if (liabilityAccountingEnabled[roundId]) {
-                roundIds[roundClaimCount] = roundId;
-                amounts[roundClaimCount] = amount;
-                roundClaimCount++;
-            } else {
-                legacyAmount += amount;
-            }
+            roundIds[roundClaimCount] = roundId;
+            amounts[roundClaimCount] = amount;
+            roundClaimCount++;
         }
 
         if (roundClaimCount > 0) {
@@ -522,9 +426,6 @@ contract WusdLotto3DGame is
                 mstore(amounts, roundClaimCount)
             }
             treasury.payRoundClaims(roundIds, msg.sender, amounts);
-        }
-        if (legacyAmount > 0) {
-            treasury.payClaimBatch(msg.sender, legacyAmount);
         }
     }
 
@@ -576,10 +477,6 @@ contract WusdLotto3DGame is
         if (rd.status == RoundStatus.Cancelled) revert RoundAlreadyCancelled();
 
         rd.status = RoundStatus.Cancelled;
-
-        if (rd.totalSales > 0) {
-            treasury.reserveForRefund(rd.totalSales);
-        }
 
         emit RoundCancelled(roundId);
     }
@@ -655,12 +552,6 @@ contract WusdLotto3DGame is
 
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
-    }
-
-    function disableLegacyPurchases() external onlyRole(ADMIN_ROLE) {
-        if (legacyPurchasesDisabled) revert LegacyPurchasesAreDisabled();
-        legacyPurchasesDisabled = true;
-        emit LegacyPurchasesPermanentlyDisabled();
     }
 
     function setClaimPeriod(uint64 newPeriod) external onlyRole(ADMIN_ROLE) whenPaused {

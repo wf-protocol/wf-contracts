@@ -2,6 +2,12 @@
 pragma solidity ^0.8.24;
 
 interface IGameModuleV4 {
+    function protocolImplementationHash() external view returns (bytes32);
+    function quotePurchase(address payer, address beneficiary, bytes calldata purchaseData)
+        external
+        view
+        returns (uint256 amount);
+
     struct PurchaseContext {
         bytes32 wfOrderId;
         bytes32 partnerCode;

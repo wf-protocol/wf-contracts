@@ -6,10 +6,10 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
 import {IGameRegistry} from "./IGameRegistry.sol";
-import {IGameModuleV3} from "./IGameModuleV3.sol";
+import {IGameModuleV4} from "./IGameModuleV4.sol";
 
 /// @title GameRegistry
-/// @notice Canonical registry for games that UnifiedLedger V3 may execute.
+/// @notice Canonical registry for games that UnifiedLedger V4 may execute.
 contract GameRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeable, IGameRegistry {
     bytes32 public constant REGISTRY_MANAGER_ROLE = keccak256("REGISTRY_MANAGER_ROLE");
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
@@ -165,7 +165,7 @@ contract GameRegistry is Initializable, UUPSUpgradeable, AccessControlUpgradeabl
         if (game.code.length == 0) return (bytes32(0), false);
 
         (bool success, bytes memory returnData) =
-            game.staticcall(abi.encodeWithSelector(IGameModuleV3.protocolImplementationHash.selector));
+            game.staticcall(abi.encodeWithSelector(IGameModuleV4.protocolImplementationHash.selector));
         if (!success || returnData.length != 32) return (bytes32(0), false);
 
         currentHash = abi.decode(returnData, (bytes32));

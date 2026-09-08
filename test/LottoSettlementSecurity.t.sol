@@ -100,7 +100,13 @@ contract MockLottoSettlementTreasury {
         lastPrizeReserve = amount;
     }
 
-    function collectRevenue(uint256) external {}
+    function previewRoundPrize(uint256, uint256 sales) external pure returns (uint256) {
+        return sales * 8000 / 10000;
+    }
+
+    function finalizeRoundRevenue(uint256, uint256 sales) external pure returns (uint256) {
+        return sales * 8000 / 10000;
+    }
     function payRoundClaim(uint40, address, uint256, uint256) external {}
     function recycleToCarryPool(uint256) external {}
     function payClaim(address, uint256) external {}

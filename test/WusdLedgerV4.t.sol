@@ -8,11 +8,9 @@ import {GameRegistry} from "../src/protocol/GameRegistry.sol";
 import {IGameRegistry} from "../src/protocol/IGameRegistry.sol";
 import {IGameModuleV4} from "../src/protocol/IGameModuleV4.sol";
 import {IUnifiedLedgerV4} from "../src/wusd/IUnifiedLedgerV4.sol";
-import {UnifiedLedgerV2} from "../src/wusd/UnifiedLedgerV2.sol";
-import {UnifiedLedgerV3} from "../src/wusd/UnifiedLedgerV3.sol";
 import {UnifiedLedgerV4} from "../src/wusd/UnifiedLedgerV4.sol";
 import {MockGameModuleV4} from "./mocks/MockGameModuleV4.sol";
-import {MockOfficialTreasuryV3} from "./mocks/MockOfficialTreasuryV3.sol";
+import {MockOfficialTreasuryV4} from "./mocks/MockOfficialTreasuryV4.sol";
 
 contract WusdLedgerV4Test is Test {
     uint256 internal constant UNIT = 1e6;
@@ -25,7 +23,7 @@ contract WusdLedgerV4Test is Test {
     GameRegistry internal registry;
     UnifiedLedgerV4 internal ledger;
     MockGameModuleV4 internal game;
-    MockOfficialTreasuryV3 internal treasury;
+    MockOfficialTreasuryV4 internal treasury;
 
     event PurchaseExecutedV4(
         bytes32 indexed receiptId,
@@ -51,18 +49,19 @@ contract WusdLedgerV4Test is Test {
         );
         ledger = UnifiedLedgerV4(
             address(
-                new ERC1967Proxy(address(new UnifiedLedgerV4()), abi.encodeCall(UnifiedLedgerV2.initialize, (admin)))
+                new ERC1967Proxy(
+                    address(new UnifiedLedgerV4()),
+                    abi.encodeCall(UnifiedLedgerV4.initialize, (admin, IGameRegistry(address(registry))))
+                )
             )
         );
         vm.startPrank(admin);
-        ledger.initializeV3(IGameRegistry(address(registry)));
-        ledger.initializeV4();
         ledger.grantRole(ledger.RESERVE_ROLE(), admin);
         ledger.creditFromReserve(user, 100 * UNIT);
         vm.stopPrank();
 
         game = new MockGameModuleV4(address(ledger));
-        treasury = new MockOfficialTreasuryV3();
+        treasury = new MockOfficialTreasuryV4();
         vm.prank(admin);
         registry.registerGame(
             address(game), address(treasury), address(0), address(game).codehash, keccak256("rules-v4"), true, true
@@ -159,31 +158,5 @@ contract WusdLedgerV4Test is Test {
         assertEq(game.partnerBps(), 900);
         assertEq(ledger.balanceOf(user), 98 * UNIT);
         assertEq(ledger.purchaseNonces(user), 1);
-    }
-
-    function test_UpgradeFromV3PreservesBalancesRegistryAndNonces() public {
-        UnifiedLedgerV3 ledgerV3 = UnifiedLedgerV3(
-            address(
-                new ERC1967Proxy(address(new UnifiedLedgerV3()), abi.encodeCall(UnifiedLedgerV2.initialize, (admin)))
-            )
-        );
-        vm.startPrank(admin);
-        ledgerV3.initializeV3(IGameRegistry(address(registry)));
-        ledgerV3.grantRole(ledgerV3.RESERVE_ROLE(), admin);
-        ledgerV3.creditFromReserve(user, 25 * UNIT);
-        vm.stopPrank();
-        vm.prank(user);
-        ledgerV3.invalidatePurchaseNonce(7);
-
-        UnifiedLedgerV4 implementation = new UnifiedLedgerV4();
-        vm.prank(admin);
-        ledgerV3.upgradeToAndCall(address(implementation), abi.encodeCall(UnifiedLedgerV4.initializeV4, ()));
-        UnifiedLedgerV4 upgraded = UnifiedLedgerV4(address(ledgerV3));
-
-        assertEq(upgraded.balanceOf(user), 25 * UNIT);
-        assertEq(upgraded.totalWusdLiability(), 25 * UNIT);
-        assertEq(address(upgraded.gameRegistry()), address(registry));
-        assertEq(upgraded.purchaseNonces(user), 7);
-        assertFalse(upgraded.usedWfOrderIds(keccak256("unused")));
     }
 }

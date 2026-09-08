@@ -5,11 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {ILotto3DGame} from "../src/games/lotto3d/interfaces/ILotto3DGame.sol";
-import {IUnifiedLedgerV2} from "../src/wusd/IUnifiedLedgerV2.sol";
+import {IUnifiedLedgerV4} from "../src/wusd/IUnifiedLedgerV4.sol";
 import {IWusdLotto3DTreasury} from "../src/games/wusd/lotto3d/IWusdLotto3DTreasury.sol";
 import {WusdLotto3DGame} from "../src/games/wusd/lotto3d/WusdLotto3DGame.sol";
 
 contract MockLotto3DOrderingTreasury {
+    function snapshotRoundAllocation(uint256) external pure returns (uint16, uint16, uint16, uint16, uint32, bool) {
+        return (8000, 0, 500, 1500, 1, true);
+    }
     bool public lastReleaseRound;
 
     function settleRoundPrize(uint40, bool isReleaseRound) external returns (uint256 prizePool) {
@@ -36,7 +39,7 @@ contract WusdLotto3DOrderingTest is Test {
                     address(new WusdLotto3DGame()),
                     abi.encodeCall(
                         WusdLotto3DGame.initialize,
-                        (address(this), IUnifiedLedgerV2(address(0xBEEF)), IWusdLotto3DTreasury(address(treasury)), 1e6)
+                        (address(this), IUnifiedLedgerV4(address(0xBEEF)), IWusdLotto3DTreasury(address(treasury)), 1e6)
                     )
                 )
             )

@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {IUnifiedLedgerV2} from "../wusd/IUnifiedLedgerV2.sol";
+import {IUnifiedLedgerV4} from "../wusd/IUnifiedLedgerV4.sol";
 import {IDatRevenueVault} from "./IDatRevenueVault.sol";
 
 /// @title DatRevenueVault
@@ -12,7 +12,7 @@ import {IDatRevenueVault} from "./IDatRevenueVault.sol";
 contract DatRevenueVault is AccessControl, ReentrancyGuard, IDatRevenueVault {
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
 
-    IUnifiedLedgerV2 public immutable ledger;
+    IUnifiedLedgerV4 public immutable ledger;
     address public override beneficiary;
     address public proposedBeneficiary;
     bool public beneficiaryChangeApproved;
@@ -27,7 +27,7 @@ contract DatRevenueVault is AccessControl, ReentrancyGuard, IDatRevenueVault {
     error UnauthorizedBeneficiary();
     error InvalidBeneficiaryChange();
 
-    constructor(address governance, IUnifiedLedgerV2 ledger_, address beneficiary_) {
+    constructor(address governance, IUnifiedLedgerV4 ledger_, address beneficiary_) {
         if (governance == address(0) || address(ledger_) == address(0) || beneficiary_ == address(0)) {
             revert ZeroAddress();
         }
@@ -39,15 +39,10 @@ contract DatRevenueVault is AccessControl, ReentrancyGuard, IDatRevenueVault {
         _grantRole(GOVERNANCE_ROLE, governance);
     }
 
-    /// @notice Establishes this vault's allowance after it has been registered as a Ledger operator.
-    function syncLedgerAllowance() external {
-        ledger.approveOperator(address(this), type(uint256).max);
-    }
-
     function claim(uint256 amount) external override nonReentrant {
         if (msg.sender != beneficiary) revert UnauthorizedBeneficiary();
         if (amount == 0) revert ZeroAmount();
-        ledger.operatorTransfer(address(this), beneficiary, amount);
+        ledger.protocolTransfer(beneficiary, amount);
         emit DatRevenueClaimed(beneficiary, amount);
     }
 
@@ -55,7 +50,7 @@ contract DatRevenueVault is AccessControl, ReentrancyGuard, IDatRevenueVault {
         if (msg.sender != beneficiary) revert UnauthorizedBeneficiary();
         uint256 amount = ledger.balanceOf(address(this));
         if (amount == 0) revert ZeroAmount();
-        ledger.operatorTransfer(address(this), beneficiary, amount);
+        ledger.protocolTransfer(beneficiary, amount);
         emit DatRevenueClaimed(beneficiary, amount);
     }
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IVRFCoordinatorV2Plus} from "../../src/games/lotto7/interfaces/IVRFCoordinatorV2Plus.sol";
+import {IVRFCoordinatorV2Plus} from "../../src/games/lotto3d/interfaces/IVRFCoordinatorV2.sol";
 
 interface IVRFConsumer {
     function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external;

@@ -9,17 +9,12 @@ import {GameRegistry} from "../src/protocol/GameRegistry.sol";
 import {IGameRegistry} from "../src/protocol/IGameRegistry.sol";
 import {IRevenueAllocationTreasury} from "../src/protocol/IRevenueAllocationTreasury.sol";
 import {ProtocolRevenueRouter} from "../src/protocol/ProtocolRevenueRouter.sol";
-import {IUnifiedLedgerV2} from "../src/wusd/IUnifiedLedgerV2.sol";
 import {IUnifiedLedgerV4} from "../src/wusd/IUnifiedLedgerV4.sol";
-import {UnifiedLedgerV2} from "../src/wusd/UnifiedLedgerV2.sol";
 import {UnifiedLedgerV4} from "../src/wusd/UnifiedLedgerV4.sol";
 
 import {ILotto3DGame} from "../src/games/lotto3d/interfaces/ILotto3DGame.sol";
 import {WusdLotto3DGame} from "../src/games/wusd/lotto3d/WusdLotto3DGame.sol";
 import {WusdLotto3DTreasury} from "../src/games/wusd/lotto3d/WusdLotto3DTreasury.sol";
-import {ILotto7Game} from "../src/games/lotto7/interfaces/ILotto7Game.sol";
-import {WusdLotto7Game} from "../src/games/wusd/lotto7/WusdLotto7Game.sol";
-import {WusdLotto7Treasury} from "../src/games/wusd/lotto7/WusdLotto7Treasury.sol";
 import {ILottoRounds} from "../src/games/lotto7uma/interfaces/ILottoRounds.sol";
 import {WusdLottoRounds} from "../src/games/wusd/lotto7uma/WusdLottoRounds.sol";
 import {WusdLottoTreasury} from "../src/games/wusd/lotto7uma/WusdLottoTreasury.sol";
@@ -37,8 +32,6 @@ contract WusdLotteryV4E2ETest is Test {
     UnifiedLedgerV4 internal ledger;
     ProtocolRevenueRouter internal router;
     DatRevenueVault internal datVault;
-    WusdLotto7Game internal lotto7;
-    WusdLotto7Treasury internal lotto7Treasury;
     WusdLotto3DGame internal lotto3d;
     WusdLotto3DTreasury internal lotto3dTreasury;
     WusdLottoRounds internal umaRounds;
@@ -52,44 +45,25 @@ contract WusdLotteryV4E2ETest is Test {
         );
         ledger = UnifiedLedgerV4(
             address(
-                new ERC1967Proxy(address(new UnifiedLedgerV4()), abi.encodeCall(UnifiedLedgerV2.initialize, (admin)))
+                new ERC1967Proxy(
+                    address(new UnifiedLedgerV4()),
+                    abi.encodeCall(UnifiedLedgerV4.initialize, (admin, IGameRegistry(address(registry))))
+                )
             )
         );
         router = new ProtocolRevenueRouter(admin, 8000, 0, 500, 1500);
-        datVault = new DatRevenueVault(admin, IUnifiedLedgerV2(address(ledger)), address(0xDA7A));
+        datVault = new DatRevenueVault(admin, IUnifiedLedgerV4(address(ledger)), address(0xDA7A));
 
         _deployGames();
         _configureProtocol();
     }
 
     function _deployGames() internal {
-        lotto7Treasury = WusdLotto7Treasury(
-            address(
-                new ERC1967Proxy(
-                    address(new WusdLotto7Treasury()),
-                    abi.encodeCall(
-                        WusdLotto7Treasury.initialize, (admin, IUnifiedLedgerV2(address(ledger)), ops, address(0xD1A1))
-                    )
-                )
-            )
-        );
-        lotto7 = WusdLotto7Game(
-            address(
-                new ERC1967Proxy(
-                    address(new WusdLotto7Game()),
-                    abi.encodeCall(
-                        WusdLotto7Game.initialize,
-                        (admin, IUnifiedLedgerV2(address(ledger)), lotto7Treasury, block.timestamp)
-                    )
-                )
-            )
-        );
-
         lotto3dTreasury = WusdLotto3DTreasury(
             address(
                 new ERC1967Proxy(
                     address(new WusdLotto3DTreasury()),
-                    abi.encodeCall(WusdLotto3DTreasury.initialize, (admin, IUnifiedLedgerV2(address(ledger)), ops))
+                    abi.encodeCall(WusdLotto3DTreasury.initialize, (admin, IUnifiedLedgerV4(address(ledger)), ops))
                 )
             )
         );
@@ -98,7 +72,7 @@ contract WusdLotteryV4E2ETest is Test {
                 new ERC1967Proxy(
                     address(new WusdLotto3DGame()),
                     abi.encodeCall(
-                        WusdLotto3DGame.initialize, (admin, IUnifiedLedgerV2(address(ledger)), lotto3dTreasury, UNIT)
+                        WusdLotto3DGame.initialize, (admin, IUnifiedLedgerV4(address(ledger)), lotto3dTreasury, UNIT)
                     )
                 )
             )
@@ -110,7 +84,7 @@ contract WusdLotteryV4E2ETest is Test {
                     address(new WusdLottoTreasury()),
                     abi.encodeCall(
                         WusdLottoTreasury.initialize,
-                        (admin, IUnifiedLedgerV2(address(ledger)), UNIT, ops, address(0xD1A1), address(0xF00D))
+                        (admin, IUnifiedLedgerV4(address(ledger)), UNIT, ops, address(0xF00D))
                     )
                 )
             )
@@ -121,7 +95,7 @@ contract WusdLotteryV4E2ETest is Test {
                     address(new WusdLottoRounds()),
                     abi.encodeCall(
                         WusdLottoRounds.initialize,
-                        (admin, IUnifiedLedgerV2(address(ledger)), address(umaTreasury), UNIT)
+                        (admin, IUnifiedLedgerV4(address(ledger)), address(umaTreasury), UNIT)
                     )
                 )
             )
@@ -130,24 +104,18 @@ contract WusdLotteryV4E2ETest is Test {
 
     function _configureProtocol() internal {
         vm.startPrank(admin);
-        ledger.initializeV3(IGameRegistry(address(registry)));
-        ledger.initializeV4();
         ledger.grantRole(ledger.RESERVE_ROLE(), admin);
 
-        ledger.registerOperator(address(lotto7Treasury));
-        ledger.registerOperator(address(lotto3dTreasury));
-        ledger.registerOperator(address(umaTreasury));
-        ledger.registerOperator(address(datVault));
+        ledger.grantRole(ledger.PROTOCOL_ACCOUNT_ROLE(), address(lotto3dTreasury));
+        ledger.grantRole(ledger.PROTOCOL_ACCOUNT_ROLE(), address(umaTreasury));
+        ledger.grantRole(ledger.PROTOCOL_ACCOUNT_ROLE(), address(datVault));
 
-        lotto7Treasury.grantRole(lotto7Treasury.GAME_ROLE(), address(lotto7));
         lotto3dTreasury.grantRole(lotto3dTreasury.GAME_ROLE(), address(lotto3d));
         umaTreasury.grantRole(umaTreasury.ROUNDS_ROLE(), address(umaRounds));
 
-        lotto7Treasury.initializeRevenue(router, address(datVault), partnerSafe, ops, revenueSettler);
         lotto3dTreasury.initializeRevenue(router, address(datVault), partnerSafe, ops, revenueSettler);
         umaTreasury.initializeRevenue(router, address(datVault), partnerSafe, ops, revenueSettler);
 
-        lotto7.grantRole(lotto7.GAME_ROLE(), admin);
         lotto3d.grantRole(lotto3d.VRF_ROLE(), admin);
 
         lotto3d.createRound(
@@ -170,19 +138,6 @@ contract WusdLotteryV4E2ETest is Test {
             })
         );
 
-        lotto7.initializeRevenueV4();
-        lotto3d.initializeRevenueV4(1);
-        umaRounds.initializeRevenueV4(1);
-
-        registry.registerGame(
-            address(lotto7),
-            address(lotto7Treasury),
-            address(0),
-            lotto7.protocolImplementationHash(),
-            keccak256("lotto7-v4"),
-            true,
-            true
-        );
         registry.registerGame(
             address(lotto3d),
             address(lotto3dTreasury),
@@ -225,19 +180,6 @@ contract WusdLotteryV4E2ETest is Test {
     }
 
     function test_V4PurchasesReachAllOfficialLotteryGames() public {
-        uint32[] memory lotto7Numbers = new uint32[](1);
-        lotto7Numbers[0] = 1_234_567;
-        uint32[] memory lotto7Multipliers = new uint32[](1);
-        lotto7Multipliers[0] = 1;
-        bytes memory lotto7Data = abi.encode(uint256(1), lotto7Numbers, lotto7Multipliers);
-        bytes32 lotto7OrderId = keccak256("partner-order-lotto7");
-        bytes32 partnerCode = keccak256("partner-a");
-        IUnifiedLedgerV4.PurchaseRequestV4 memory lotto7Request =
-            _request(address(lotto7), UNIT, lotto7Data, lotto7OrderId, partnerCode);
-
-        vm.prank(user);
-        ledger.executePurchaseV4(lotto7Request, lotto7Data);
-
         uint16[] memory lotto3dNumbers = new uint16[](1);
         lotto3dNumbers[0] = 123;
         bytes memory lotto3dData = abi.encode(uint40(1), lotto3dNumbers);
@@ -256,62 +198,11 @@ contract WusdLotteryV4E2ETest is Test {
         vm.prank(user);
         ledger.executePurchaseV4(umaRequest, umaData);
 
-        assertEq(ledger.balanceOf(user), 97 * UNIT);
-        assertEq(ledger.balanceOf(address(lotto7Treasury)), UNIT);
+        assertEq(ledger.balanceOf(user), 98 * UNIT);
         assertEq(ledger.balanceOf(address(lotto3dTreasury)), UNIT);
         assertEq(ledger.balanceOf(address(umaTreasury)), UNIT);
-        assertEq(lotto7.userBoughtCount(1, user), 1);
         assertEq(lotto3d.ticketsPerAddress(1, user), 1);
         assertEq(umaRounds.ticketsPerRound(1, user), 1);
-        assertEq(ledger.purchaseNonces(user), 3);
-        assertTrue(ledger.usedWfOrderIds(lotto7OrderId));
-    }
-
-    function test_RealGameReadsAllocationFromTreasury() public {
-        uint32[] memory numbers = new uint32[](1);
-        numbers[0] = 1_234_567;
-        uint32[] memory multipliers = new uint32[](1);
-        multipliers[0] = 1;
-        bytes memory purchaseData = abi.encode(uint256(1), numbers, multipliers);
-        IUnifiedLedgerV4.PurchaseRequestV4 memory request =
-            _request(address(lotto7), UNIT, purchaseData, bytes32(0), bytes32(0));
-        vm.prank(user);
-        ledger.executePurchaseV4(request, purchaseData);
-
-        IRevenueAllocationTreasury.RoundRevenueAllocation memory allocation_ = lotto7Treasury.roundRevenueAllocation(1);
-        assertEq(allocation_.version, 1);
-        assertEq(allocation_.partnerBps, 500);
-        assertEq(ledger.balanceOf(user), 99 * UNIT);
-        assertEq(ledger.balanceOf(address(lotto7Treasury)), UNIT);
-        assertEq(lotto7.userBoughtCount(1, user), 1);
-        assertEq(ledger.purchaseNonces(user), 1);
-    }
-
-    function test_SettlementUsesRoundSnapshotAfterRouterUpdate() public {
-        uint32[] memory numbers = new uint32[](1);
-        numbers[0] = 1_234_567;
-        uint32[] memory multipliers = new uint32[](1);
-        multipliers[0] = 10;
-        bytes memory purchaseData = abi.encode(uint256(1), numbers, multipliers);
-        IUnifiedLedgerV4.PurchaseRequestV4 memory request =
-            _request(address(lotto7), 10 * UNIT, purchaseData, bytes32(0), bytes32(0));
-
-        vm.prank(user);
-        ledger.executePurchaseV4(request, purchaseData);
-
-        vm.prank(admin);
-        router.setRevenueAllocation(7000, 1000, 1000, 1000);
-        vm.prank(admin);
-        lotto7.settleDraw(1, 1_234_567);
-
-        IRevenueAllocationTreasury.RoundRevenueAllocation memory round1 = lotto7Treasury.roundRevenueAllocation(1);
-        IRevenueAllocationTreasury.RoundRevenueAllocation memory round2 = lotto7Treasury.roundRevenueAllocation(2);
-        assertEq(round1.version, 1);
-        assertEq(round1.prizeBps, 8000);
-        assertEq(round2.version, 2);
-        assertEq(round2.prizeBps, 7000);
-        assertEq(lotto7Treasury.partnerReserveAccrued(), UNIT / 2);
-        assertEq(lotto7Treasury.opsAccrued(), 3 * UNIT / 2);
-        assertEq(lotto7Treasury.datDistributed(), 0);
+        assertEq(ledger.purchaseNonces(user), 2);
     }
 }

@@ -5,8 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {ILottoRounds} from "../src/games/lotto7uma/interfaces/ILottoRounds.sol";
-import {IUnifiedLedgerV2} from "../src/wusd/IUnifiedLedgerV2.sol";
+import {IUnifiedLedgerV4} from "../src/wusd/IUnifiedLedgerV4.sol";
 import {WusdLottoRounds} from "../src/games/wusd/lotto7uma/WusdLottoRounds.sol";
+
+contract MockSourcePlanTreasury {
+    function snapshotRoundAllocation(uint256) external pure returns (uint16, uint16, uint16, uint16, uint32, bool) {
+        return (8000, 0, 500, 1500, 1, true);
+    }
+}
 
 contract WusdLottoRoundsOrderingTest is Test {
     WusdLottoRounds internal rounds;
@@ -20,7 +26,7 @@ contract WusdLottoRoundsOrderingTest is Test {
                     address(new WusdLottoRounds()),
                     abi.encodeCall(
                         WusdLottoRounds.initialize,
-                        (address(this), IUnifiedLedgerV2(address(0xBEEF)), address(0xCAFE), 1e6)
+                        (address(this), IUnifiedLedgerV4(address(0xBEEF)), address(new MockSourcePlanTreasury()), 1e6)
                     )
                 )
             )

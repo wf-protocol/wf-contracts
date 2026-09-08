@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IGameModuleV3} from "../../src/protocol/IGameModuleV3.sol";
 import {IGameModuleV4} from "../../src/protocol/IGameModuleV4.sol";
 
-contract MockGameModuleV4 is IGameModuleV3, IGameModuleV4 {
+contract MockGameModuleV4 is IGameModuleV4 {
     address public immutable ledger;
     uint32 public allocationVersion = 1;
     uint16 public partnerBps = 500;
@@ -30,10 +29,6 @@ contract MockGameModuleV4 is IGameModuleV3, IGameModuleV4 {
 
     function quotePurchase(address, address, bytes calldata purchaseData) external pure returns (uint256 amount) {
         amount = abi.decode(purchaseData, (uint256));
-    }
-
-    function purchaseFromLedger(address, address, uint256, bytes calldata) external pure returns (bytes32) {
-        revert("V4 only");
     }
 
     function purchaseFromLedgerV4(

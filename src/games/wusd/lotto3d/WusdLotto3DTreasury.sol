@@ -7,7 +7,9 @@ import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/acce
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {IUnifiedLedgerV2} from "../../../wusd/IUnifiedLedgerV2.sol";
+import {IProtocolFundingReceiver} from "../../../protocol/IProtocolFundingReceiver.sol";
+
+import {IUnifiedLedgerV4} from "../../../wusd/IUnifiedLedgerV4.sol";
 import {IProtocolRevenueRouter} from "../../../protocol/IProtocolRevenueRouter.sol";
 import {IRevenueAllocationTreasury} from "../../../protocol/IRevenueAllocationTreasury.sol";
 import {RevenueAllocationLib} from "../../../protocol/RevenueAllocationLib.sol";
@@ -22,6 +24,7 @@ contract WusdLotto3DTreasury is
     AccessControlUpgradeable,
     PausableUpgradeable,
     ReentrancyGuard,
+    IProtocolFundingReceiver,
     IWusdLotto3DTreasury
 {
     // ─── Roles ──────────────────────────────────────────────────────────
@@ -31,9 +34,6 @@ contract WusdLotto3DTreasury is
     bytes32 public constant REVENUE_SETTLER_ROLE = keccak256("REVENUE_SETTLER_ROLE");
 
     // ─── Constants ──────────────────────────────────────────────────────
-    uint256 public constant PRIZE_BPS = 5000; // 50% to current prize pool
-    uint256 public constant ACCUMULATE_BPS = 3000; // 30% to accumulated pool
-    uint256 public constant OPS_BPS = 2000; // 20% to ops
     uint256 public constant RELEASE_BPS = 3000; // release 30% of accumulated pool
     uint256 public constant BPS_BASE = 10000;
 
@@ -47,8 +47,6 @@ contract WusdLotto3DTreasury is
     error ClaimWindowClosed();
     error ClaimWindowOpen();
     error LengthMismatch();
-    error LegacyAccountingNotReconciled();
-    error LegacyAccountingAlreadyReconciled();
     error RevenueNotConfigured();
     error RoundAllocationAlreadySnapshotted();
     error RoundAllocationNotSnapshotted();
@@ -57,13 +55,12 @@ contract WusdLotto3DTreasury is
     error OnlyPartnerPayoutSafe();
 
     // ─── State ──────────────────────────────────────────────────────────
-    IUnifiedLedgerV2 public ledger;
+    IUnifiedLedgerV4 public ledger;
 
     uint256 public accumulatedPool;
     uint256 public opsAccrued;
     uint256 public pendingPrize;
     uint256 public refundReserve;
-    uint256 public unclaimedPrize;
 
     mapping(uint40 => bool) public salesCollected;
     mapping(uint40 => uint256) public roundPrizePool;
@@ -73,9 +70,7 @@ contract WusdLotto3DTreasury is
     mapping(uint40 => bool) public roundClaimsExpired;
     uint256 public pendingRoundPrize;
     uint256 public activeWinnerLiability;
-    bool public legacyAccountingReconciled;
     mapping(uint40 => bool) public roundPrizePrepared;
-    /// @dev V4 revenue storage additions. Never insert fields above this line.
     IProtocolRevenueRouter public revenueRouter;
     address public datRevenueVault;
     address public partnerPayoutSafe;
@@ -101,7 +96,6 @@ contract WusdLotto3DTreasury is
         uint40 indexed roundId, uint64 claimDeadline, uint256 winnerLiability, uint256 recycled
     );
     event RoundClaimsExpired(uint40 indexed roundId, uint256 recycledAmount);
-    event LegacyAccountingReconciled(uint256 previousUnclaimedPrize, uint256 verifiedUnclaimedPrize, uint256 recycled);
     event RoundAllocationSnapshotted(
         uint256 indexed roundId,
         uint32 indexed version,
@@ -129,7 +123,7 @@ contract WusdLotto3DTreasury is
         _disableInitializers();
     }
 
-    function initialize(address admin_, IUnifiedLedgerV2 ledger_, address ops_) public initializer {
+    function initialize(address admin_, IUnifiedLedgerV4 ledger_, address ops_) public initializer {
         if (admin_ == address(0) || address(ledger_) == address(0) || ops_ == address(0)) {
             revert ZeroAddress();
         }
@@ -142,13 +136,6 @@ contract WusdLotto3DTreasury is
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
         _grantRole(OPS_ROLE, ops_);
-        legacyAccountingReconciled = true;
-    }
-
-    /// @notice 在代理部署完成后，为 Treasury 自有 WUSD 建立支出额度。
-    /// @dev 不可放在代理构造期的 initializer 中；构造期跨合约调用的 msg.sender 是部署者。
-    function syncLedgerAllowance() external onlyRole(ADMIN_ROLE) {
-        ledger.approveOperator(address(this), type(uint256).max);
     }
 
     function initializeRevenue(
@@ -207,20 +194,9 @@ contract WusdLotto3DTreasury is
         if (totalSales == 0) revert ZeroAmount();
         if (salesCollected[roundId]) revert AlreadyCollected();
         IRevenueAllocationTreasury.RoundRevenueAllocation memory allocation_ = _roundRevenueAllocations[roundId];
-        if (!allocation_.snapshotted) {
-            if (address(revenueRouter) != address(0)) revert RoundAllocationNotSnapshotted();
-            salesCollected[roundId] = true;
-            uint256 legacyPrizeAmount = totalSales * PRIZE_BPS / BPS_BASE;
-            uint256 legacyAccumulateAmount = totalSales * ACCUMULATE_BPS / BPS_BASE;
-            uint256 legacyOpsAmount = totalSales - legacyPrizeAmount - legacyAccumulateAmount;
-            pendingPrize += legacyPrizeAmount;
-            roundBasePrize[roundId] = legacyPrizeAmount;
-            accumulatedPool += legacyAccumulateAmount;
-            opsAccrued += legacyOpsAmount;
-            _requireSolvent();
-            emit SalesCollected(roundId, totalSales, legacyPrizeAmount, legacyAccumulateAmount, legacyOpsAmount);
-            return;
-        }
+        if (!allocation_.snapshotted) revert RoundAllocationNotSnapshotted();
+        if (totalSales > refundReserve) revert InsufficientBalance();
+        refundReserve -= totalSales;
 
         salesCollected[roundId] = true;
         revenueFinalized[roundId] = true;
@@ -237,7 +213,7 @@ contract WusdLotto3DTreasury is
         partnerReserveAccrued += partnerAmount;
         if (datAmount > 0) {
             datDistributed += datAmount;
-            ledger.operatorTransfer(address(this), datRevenueVault, datAmount);
+            ledger.protocolTransfer(datRevenueVault, datAmount);
         }
 
         _requireSolvent();
@@ -281,7 +257,6 @@ contract WusdLotto3DTreasury is
         onlyRole(GAME_ROLE)
         whenNotPaused
     {
-        if (!legacyAccountingReconciled) revert LegacyAccountingNotReconciled();
         if (roundAccountingFinalized[roundId]) revert RoundAlreadyFinalized();
         if (!roundPrizePrepared[roundId]) revert RoundNotSettled();
         uint256 prizePool = roundPrizePool[roundId];
@@ -303,7 +278,7 @@ contract WusdLotto3DTreasury is
     function payRoundClaim(uint40 roundId, address to, uint256 amount) external onlyRole(GAME_ROLE) nonReentrant {
         _consumeRoundLiability(roundId, amount);
         if (to == address(0)) revert ZeroAddress();
-        ledger.operatorTransfer(address(this), to, amount);
+        ledger.protocolTransfer(to, amount);
         emit ClaimPaid(to, amount);
     }
 
@@ -320,7 +295,7 @@ contract WusdLotto3DTreasury is
             _consumeRoundLiability(roundIds[i], amounts[i]);
             totalAmount += amounts[i];
         }
-        ledger.operatorTransfer(address(this), to, totalAmount);
+        ledger.protocolTransfer(to, totalAmount);
         emit ClaimPaid(to, totalAmount);
     }
 
@@ -347,64 +322,39 @@ contract WusdLotto3DTreasury is
         activeWinnerLiability -= amount;
     }
 
-    /// @inheritdoc ILotto3DTreasury
-    function payClaim(address to, uint256 amount) external onlyRole(GAME_ROLE) whenNotPaused nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
-        if (amount == 0) revert ZeroAmount();
-        if (amount > unclaimedPrize || amount > ledger.balanceOf(address(this))) revert InsufficientBalance();
-        unclaimedPrize -= amount;
-
-        ledger.operatorTransfer(address(this), to, amount);
-
-        emit ClaimPaid(to, amount);
-    }
-
-    /// @inheritdoc ILotto3DTreasury
-    /// @dev Batch claims intentionally aggregate only the ledger transfer. The game
-    ///      still validates and marks every ticket independently.
-    function payClaimBatch(address to, uint256 amount) external onlyRole(GAME_ROLE) whenNotPaused nonReentrant {
-        if (to == address(0)) revert ZeroAddress();
-        if (amount == 0) revert ZeroAmount();
-        if (amount > unclaimedPrize || amount > ledger.balanceOf(address(this))) revert InsufficientBalance();
-        unclaimedPrize -= amount;
-
-        ledger.operatorTransfer(address(this), to, amount);
-
-        emit ClaimPaid(to, amount);
-    }
-
-    /// @inheritdoc ILotto3DTreasury
     function payRefund(address to, uint256 amount) external onlyRole(GAME_ROLE) nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         if (amount > refundReserve || amount > ledger.balanceOf(address(this))) revert InsufficientBalance();
         refundReserve -= amount;
 
-        ledger.operatorTransfer(address(this), to, amount);
+        ledger.protocolTransfer(to, amount);
 
         emit RefundPaid(to, amount);
     }
 
-    /// @notice Reserve funds for a cancelled round's refunds.
+    /// @notice Keep every purchase reserved until its round settles or refunds.
     function reserveForRefund(uint256 amount) external onlyRole(GAME_ROLE) whenNotPaused {
         refundReserve += amount;
         _requireSolvent();
     }
 
-    // ─── Admin ──────────────────────────────────────────────────────────
-
-    /// @notice Seed the accumulated pool (e.g. initial launch fund).
-    /// @dev 调用前 msg.sender 必须已对本合约执行 `ledgerContract.approveOperator`。
-    function seedAccumulatedPool(uint256 amount) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
+    /// @notice Empty funding data credits the accumulated prize pool.
+    function onProtocolFunding(address funder, uint256 amount, bytes calldata data)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        require(msg.sender == address(ledger), "OnlyLedger");
+        if (!hasRole(ADMIN_ROLE, funder)) revert AccessControlUnauthorizedAccount(funder, ADMIN_ROLE);
+        require(data.length == 0, "InvalidFundingData");
         if (amount == 0) revert ZeroAmount();
-
-        ledger.operatorTransfer(msg.sender, address(this), amount);
         accumulatedPool += amount;
-
         _requireSolvent();
-
-        emit AccumulatedPoolSeeded(msg.sender, amount);
+        emit AccumulatedPoolSeeded(funder, amount);
     }
+
+    // ─── Admin ──────────────────────────────────────────────────────────
 
     /// @notice Claim accrued ops revenue.
     function claimOps() external onlyRole(OPS_ROLE) whenNotPaused nonReentrant {
@@ -412,13 +362,13 @@ contract WusdLotto3DTreasury is
         if (amount == 0) revert ZeroAmount();
 
         uint256 available = ledger.balanceOf(address(this));
-        uint256 reserved = pendingPrize + pendingRoundPrize + accumulatedPool + refundReserve + unclaimedPrize
-            + activeWinnerLiability + partnerReserveAccrued;
+        uint256 reserved = pendingPrize + pendingRoundPrize + accumulatedPool + refundReserve + activeWinnerLiability
+            + partnerReserveAccrued;
         uint256 claimable = available > reserved ? available - reserved : 0;
         if (amount > claimable) revert InsufficientBalance();
 
         opsAccrued = 0;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
+        ledger.protocolTransfer(msg.sender, amount);
 
         emit OpsClaimed(msg.sender, amount);
     }
@@ -437,27 +387,15 @@ contract WusdLotto3DTreasury is
 
         partnerBatchProcessed[collectionId] = true;
         partnerReserveAccrued -= amount;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
+        ledger.protocolTransfer(msg.sender, amount);
 
         _requireSolvent();
         emit PartnerReserveClaimed(collectionId, accountingRoot, amount, partnerReserveAccrued);
     }
 
-    function reconcileLegacyAccounting(uint256 verifiedUnclaimedPrize) external onlyRole(ADMIN_ROLE) {
-        if (legacyAccountingReconciled) revert LegacyAccountingAlreadyReconciled();
-        uint256 previous = unclaimedPrize;
-        if (verifiedUnclaimedPrize > previous) revert InsufficientBalance();
-        uint256 recycled = previous - verifiedUnclaimedPrize;
-        unclaimedPrize = verifiedUnclaimedPrize;
-        accumulatedPool += recycled;
-        legacyAccountingReconciled = true;
-        _requireSolvent();
-        emit LegacyAccountingReconciled(previous, verifiedUnclaimedPrize, recycled);
-    }
-
     function totalLiabilities() public view returns (uint256) {
-        return pendingPrize + pendingRoundPrize + accumulatedPool + opsAccrued + refundReserve + unclaimedPrize
-            + activeWinnerLiability + partnerReserveAccrued;
+        return pendingPrize + pendingRoundPrize + accumulatedPool + opsAccrued + refundReserve + activeWinnerLiability
+            + partnerReserveAccrued;
     }
 
     function _requireSolvent() internal view {

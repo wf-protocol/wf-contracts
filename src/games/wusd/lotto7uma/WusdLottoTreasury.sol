@@ -7,40 +7,21 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {IUnifiedLedgerV2} from "../../../wusd/IUnifiedLedgerV2.sol";
+import {IProtocolFundingReceiver} from "../../../protocol/IProtocolFundingReceiver.sol";
+
+import {IUnifiedLedgerV4} from "../../../wusd/IUnifiedLedgerV4.sol";
 import {IProtocolRevenueRouter} from "../../../protocol/IProtocolRevenueRouter.sol";
 import {IRevenueAllocationTreasury} from "../../../protocol/IRevenueAllocationTreasury.sol";
 import {RevenueAllocationLib} from "../../../protocol/RevenueAllocationLib.sol";
 import {ILottoTreasury} from "../../lotto7uma/interfaces/ILottoTreasury.sol";
 import {IWusdLottoUmaRevenueTreasury} from "./IWusdLottoUmaRevenueTreasury.sol";
 
-/// @title WusdLottoTreasury（UMA 结算版）
-/// @notice 使用 WUSD 管理 UMA 版统一滚存池、准备金、收入和派奖。
-///
-///      安全模型：业务合约必须先由 WUSD Ledger 管理员注册；资金来源地址还必须对
-///      业务合约设置足够额度。Treasury 自有资金的转出额度在代理部署完成后通过
-///      `syncLedgerAllowance()` 建立，避免代理构造期 msg.sender 归属错误。
-///
-///      部署/运维前必须完成的一步（由 LedgerContract 的 Admin_Account 执行）：
-///      - `ledgerContract.registerOperator(address(lottoTreasury))`
-///      - `ledgerContract.registerOperator(address(lottoRounds))`（见 LottoRounds.sol）
-///      资金来源方自己需要执行的一步：
-///      - 玩家：在 `LottoRounds.buy()` 之前，调用
-///        `ledger.approveOperator(address(lottoRounds), amount)`
-///      - 储备/奖池注资人：在 `depositReserve()`/`seedCarryPool()` 之前，调用
-///        `ledger.approveOperator(address(lottoTreasury), amount)`
-///
-/// CARRY MODEL (unified pool)（原版设计，未改动）：
-/// - A single `carryPool` accumulates all unawarded floating-tier prize money.
-/// - Each settlement, `LottoSettlement` splits the pool into per-tier
-///   allocations (50/30/20), computes payouts, and applies the next carryPool.
-/// - The settlement contract enforces the payout formula from on-chain ticket
-///   counters; this treasury enforces liability accounting and overflow rules.
-///
-/// WUSD ASSUMPTION：本合约只处理 6 位精度的内部记账单位，不识别底层充值资产。
+/// @title World Lotto treasury
+/// @notice WUSD prize, refund, reserve, carry and finalized revenue accounting.
 contract WusdLottoTreasury is
     Initializable,
     AccessControlUpgradeable,
+    IProtocolFundingReceiver,
     ILottoTreasury,
     IWusdLottoUmaRevenueTreasury,
     PausableUpgradeable,
@@ -51,14 +32,11 @@ contract WusdLottoTreasury is
     bytes32 public constant SETTLEMENT_ROLE = keccak256("SETTLEMENT_ROLE");
     bytes32 public constant ROUNDS_ROLE = keccak256("ROUNDS_ROLE");
     bytes32 public constant OPS_ROLE = keccak256("OPS_ROLE");
-    bytes32 public constant DIVIDEND_ROLE = keccak256("DIVIDEND_ROLE");
     bytes32 public constant FUND_ROLE = keccak256("FUND_ROLE");
     bytes32 public constant REVENUE_SETTLER_ROLE = keccak256("REVENUE_SETTLER_ROLE");
 
     uint256 public constant OVERFLOW_THRESHOLD = 500_000_000 * 1e6; // 500M U (assuming 6 decimals)
     uint256 public constant OVERFLOW_BPS = 5000; // 50%
-    uint256 public constant OPS_BPS = 1500; // 15%
-    uint256 public constant DIVIDEND_BPS = 500; // 5%
 
     error ZeroAddress();
     error ZeroAmount();
@@ -75,7 +53,7 @@ contract WusdLottoTreasury is
     error InvalidPartnerCollection();
     error OnlyPartnerPayoutSafe();
 
-    IUnifiedLedgerV2 public ledger;
+    IUnifiedLedgerV4 public ledger;
     uint256 public tokenUnit;
 
     uint256 public reserveBalance;
@@ -87,11 +65,9 @@ contract WusdLottoTreasury is
     /// @notice Maximum carry pool size. Excess is redirected to fund. 0 = no cap.
     uint256 public carryCap;
 
-    /// @notice Accrued but unclaimed revenue for ops, dividend, and fund.
+    /// @notice Accrued but unclaimed revenue for ops and carry overflow fund.
     uint256 public opsAccrued;
-    uint256 public dividendAccrued;
     uint256 public fundAccrued;
-    /// @dev UUPS storage additions must remain after every legacy field.
     uint256 public prizeReserve;
     /// @notice Ticket sales locked for full refunds until settlement.
     uint256 public refundReserve;
@@ -116,9 +92,7 @@ contract WusdLottoTreasury is
     event ReserveWithdrawn(address indexed to, uint256 amount);
     event CarryPoolSeeded(address indexed from, uint256 amount);
     event CarryApplied(uint256 carryApplied, uint256 overflowToFund);
-    event RevenueCollected(uint256 totalSales, uint256 opsAmount, uint256 dividendAmount);
     event OpsClaimed(address indexed to, uint256 amount);
-    event DividendClaimed(address indexed to, uint256 amount);
     event FundClaimed(address indexed to, uint256 amount);
     event ClaimPaid(address indexed to, uint256 amount);
     event RefundPaid(address indexed to, uint256 amount);
@@ -155,18 +129,11 @@ contract WusdLottoTreasury is
         _disableInitializers();
     }
 
-    function initialize(
-        address admin_,
-        IUnifiedLedgerV2 ledger_,
-        uint256 tokenUnit_,
-        address ops_,
-        address dividend_,
-        address fund_
-    ) public initializer {
-        if (
-            admin_ == address(0) || address(ledger_) == address(0) || ops_ == address(0) || dividend_ == address(0)
-                || fund_ == address(0)
-        ) {
+    function initialize(address admin_, IUnifiedLedgerV4 ledger_, uint256 tokenUnit_, address ops_, address fund_)
+        public
+        initializer
+    {
+        if (admin_ == address(0) || address(ledger_) == address(0) || ops_ == address(0) || fund_ == address(0)) {
             revert ZeroAddress();
         }
         if (tokenUnit_ == 0) {
@@ -182,14 +149,7 @@ contract WusdLottoTreasury is
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
         _grantRole(ADMIN_ROLE, admin_);
         _grantRole(OPS_ROLE, ops_);
-        _grantRole(DIVIDEND_ROLE, dividend_);
         _grantRole(FUND_ROLE, fund_);
-    }
-
-    /// @notice 在代理部署完成后，为 Treasury 自有 WUSD 建立支出额度。
-    /// @dev 不可放在代理构造期的 initializer 中；构造期跨合约调用的 msg.sender 是部署者。
-    function syncLedgerAllowance() external onlyRole(ADMIN_ROLE) {
-        ledger.approveOperator(address(this), type(uint256).max);
     }
 
     function initializeRevenue(
@@ -267,7 +227,7 @@ contract WusdLottoTreasury is
         partnerReserveAccrued += partnerAmount;
         if (datAmount > 0) {
             datDistributed += datAmount;
-            ledger.operatorTransfer(address(this), datRevenueVault, datAmount);
+            ledger.protocolTransfer(datRevenueVault, datAmount);
         }
         _requireSolvent();
 
@@ -278,35 +238,25 @@ contract WusdLottoTreasury is
         );
     }
 
-    /// @dev 调用前 msg.sender 必须已对本合约执行
-    ///      `ledger.approveOperator(address(lottoTreasury), amount)`，
-    ///      否则本函数内部的 operatorTransfer 会以 ExceedsOperatorAllowance revert。
-    function depositReserve(uint256 amount) external whenNotPaused nonReentrant {
-        if (amount == 0) {
-            revert ZeroAmount();
+    /// @notice Funding kind 0 credits reserve; kind 1 seeds carry (admin only).
+    function onProtocolFunding(address funder, uint256 amount, bytes calldata data)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        require(msg.sender == address(ledger), "OnlyLedger");
+        if (amount == 0) revert ZeroAmount();
+        uint8 kind = abi.decode(data, (uint8));
+        if (kind == 0) {
+            reserveBalance += amount;
+            emit ReserveDeposited(funder, amount);
+        } else {
+            require(kind == 1, "InvalidFundingData");
+            if (!hasRole(ADMIN_ROLE, funder)) revert AccessControlUnauthorizedAccount(funder, ADMIN_ROLE);
+            carryPool += amount;
+            emit CarryPoolSeeded(funder, amount);
         }
-
-        ledger.operatorTransfer(msg.sender, address(this), amount);
-        reserveBalance += amount;
         _requireSolvent();
-
-        emit ReserveDeposited(msg.sender, amount);
-    }
-
-    /// @notice Inject funds directly into the carry pool (prize pool).
-    ///         Used for initial seeding (e.g. a 2M WUSD launch fund).
-    /// @dev 调用方（onlyRole(ADMIN_ROLE)）同样必须提前对本合约执行 approveOperator，
-    ///      管理员身份不豁免用户侧授权这一层防御。
-    function seedCarryPool(uint256 amount) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
-        if (amount == 0) {
-            revert ZeroAmount();
-        }
-
-        ledger.operatorTransfer(msg.sender, address(this), amount);
-        carryPool += amount;
-        _requireSolvent();
-
-        emit CarryPoolSeeded(msg.sender, amount);
     }
 
     function withdrawReserve(address to, uint256 amount) external onlyRole(ADMIN_ROLE) whenNotPaused nonReentrant {
@@ -322,7 +272,7 @@ contract WusdLottoTreasury is
 
         reserveBalance -= amount;
         _requireSolventAfterTransfer(amount);
-        ledger.operatorTransfer(address(this), to, amount);
+        ledger.protocolTransfer(to, amount);
 
         emit ReserveWithdrawn(to, amount);
     }
@@ -330,20 +280,6 @@ contract WusdLottoTreasury is
     /// @notice Set the maximum carry pool size. Excess overflows to fund.
     function setCarryCap(uint256 cap) external onlyRole(ADMIN_ROLE) {
         carryCap = cap;
-    }
-
-    function collectRevenue(uint256 totalSales) external whenNotPaused nonReentrant {
-        if (!hasRole(ROUNDS_ROLE, msg.sender) && !hasRole(SETTLEMENT_ROLE, msg.sender)) {
-            revert AccessControlUnauthorizedAccount(msg.sender, ROUNDS_ROLE);
-        }
-        uint256 opsAmount = (totalSales * OPS_BPS) / 10000;
-        uint256 divAmount = (totalSales * DIVIDEND_BPS) / 10000;
-
-        opsAccrued += opsAmount;
-        dividendAccrued += divAmount;
-        _requireSolvent();
-
-        emit RevenueCollected(totalSales, opsAmount, divAmount);
     }
 
     /// @notice Returns the current unified carry pool balance.
@@ -363,13 +299,6 @@ contract WusdLottoTreasury is
         if (amount > refundReserve) revert InsufficientBalance();
         refundReserve -= amount;
         emit RefundReserveUpdated(-int256(amount), refundReserve);
-    }
-
-    function reservePrizes(uint256 amount) external onlyRole(SETTLEMENT_ROLE) whenNotPaused {
-        if (amount == 0) return;
-        prizeReserve += amount;
-        _requireSolvent();
-        emit PrizeReserveUpdated(amount, prizeReserve);
     }
 
     function reserveRoundPrizes(uint40 roundId, uint64 claimDeadline, uint256 amount)
@@ -437,51 +366,6 @@ contract WusdLottoTreasury is
         _requireSolvent();
     }
 
-    /// @notice 把"曾经为四五等奖预留、但因为该份额实际被更高等级（一二三等奖）
-    ///         领走而从未真正以四五等奖名义派发"的金额，重新计入统一奖池滚存。
-    /// @dev 修复本次全链上结算改造中发现的记账 bug：`LottoSettlement.postSettlement`
-    ///      的 `fixedReserve`（四五等奖预留金额）是根据 `slide4Units`/`slide3Units`
-    ///      滑动窗口聚合计数器算出来的，而这些计数器对"同一张票"是无差别累加的——
-    ///      一张一等奖（tier1）中奖票，它的号码天然会落在自己的全部 4 位/3 位窗口
-    ///      里，所以会被同时计入 winUnits1（正确）和 winUnits4/winUnits5（重复计入）。
-    ///      这部分被重复预留、但玩家在 `LottoSettlement.claim` 里只会按最高等级
-    ///      （tier1）领取一次的资金，如果不显式处理，会永久留在 Treasury 的账本余额
-    ///      里，成为任何现有函数都无法再取出的死钱（不是被偷，但也用不了）。
-    ///
-    ///      纯记账操作：资金从未真正离开 Treasury（`fixedReserve` 只是从
-    ///      `prizePool` 里"划出"用于计算 `floatPool`，不涉及任何 `operatorTransfer`
-    ///      资金转移），所以这里也不需要转账，只需要把这部分金额重新计入
-    ///      `carryPool`，让它在下一轮结算时能够被正常分配出去。与 VRF 版
-    ///      `Lotto7Game.claim` 里 `_calcForfeitedFixed` + `setJackpots(j1+recycled,...)`
-    ///      的回收机制是同一个模式，只是这里统一奖池模型下直接加进 `carryPool`。
-    function recycleToCarryPool(uint256 amount) external onlyRole(SETTLEMENT_ROLE) whenNotPaused nonReentrant {
-        if (amount == 0) {
-            return;
-        }
-        if (amount > prizeReserve) revert InsufficientBalance();
-        prizeReserve -= amount;
-        carryPool += amount;
-        emit FixedPrizeRecycled(amount);
-    }
-
-    function payClaim(address to, uint256 amount) external onlyRole(SETTLEMENT_ROLE) whenNotPaused nonReentrant {
-        if (to == address(0)) {
-            revert ZeroAddress();
-        }
-        if (amount == 0) {
-            revert ZeroAmount();
-        }
-        if (amount > prizeReserve || amount > ledger.balanceOf(address(this))) {
-            revert InsufficientBalance();
-        }
-
-        prizeReserve -= amount;
-        ledger.operatorTransfer(address(this), to, amount);
-        claimsPaid += amount;
-
-        emit ClaimPaid(to, amount);
-    }
-
     function payRoundClaim(uint40 roundId, address to, uint256 amount, uint256 recycledAmount)
         external
         onlyRole(SETTLEMENT_ROLE)
@@ -504,7 +388,7 @@ contract WusdLottoTreasury is
         activeRoundPrizeLiability -= consumed;
         prizeReserve -= consumed;
         carryPool += recycledAmount;
-        ledger.operatorTransfer(address(this), to, amount);
+        ledger.protocolTransfer(to, amount);
         claimsPaid += amount;
 
         emit RoundPrizeClaimed(roundId, to, amount, recycledAmount);
@@ -540,7 +424,7 @@ contract WusdLottoTreasury is
         }
 
         refundReserve -= amount;
-        ledger.operatorTransfer(address(this), to, amount);
+        ledger.protocolTransfer(to, amount);
 
         emit RefundReserveUpdated(-int256(amount), refundReserve);
         emit RefundPaid(to, amount);
@@ -555,19 +439,8 @@ contract WusdLottoTreasury is
         if (amount > _claimableRevenue()) revert InsufficientBalance();
 
         opsAccrued = 0;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
+        ledger.protocolTransfer(msg.sender, amount);
         emit OpsClaimed(msg.sender, amount);
-    }
-
-    /// @notice Claim accrued dividend revenue. Only DIVIDEND_ROLE holders can call.
-    function claimDividend() external onlyRole(DIVIDEND_ROLE) whenNotPaused nonReentrant {
-        uint256 amount = dividendAccrued;
-        if (amount == 0) revert ZeroAmount();
-        if (amount > _claimableRevenue()) revert InsufficientBalance();
-
-        dividendAccrued = 0;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
-        emit DividendClaimed(msg.sender, amount);
     }
 
     /// @notice Claim accrued fund overflow. Only FUND_ROLE holders can call.
@@ -577,7 +450,7 @@ contract WusdLottoTreasury is
         if (amount > _claimableRevenue()) revert InsufficientBalance();
 
         fundAccrued = 0;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
+        ledger.protocolTransfer(msg.sender, amount);
         emit FundClaimed(msg.sender, amount);
     }
 
@@ -595,7 +468,7 @@ contract WusdLottoTreasury is
 
         partnerBatchProcessed[collectionId] = true;
         partnerReserveAccrued -= amount;
-        ledger.operatorTransfer(address(this), msg.sender, amount);
+        ledger.protocolTransfer(msg.sender, amount);
 
         _requireSolvent();
         emit PartnerReserveClaimed(collectionId, accountingRoot, amount, partnerReserveAccrued);
@@ -609,8 +482,8 @@ contract WusdLottoTreasury is
     }
 
     function totalLiabilities() public view returns (uint256) {
-        return reserveBalance + refundReserve + carryPool + prizeReserve + opsAccrued + dividendAccrued + fundAccrued
-            + partnerReserveAccrued;
+        return
+            reserveBalance + refundReserve + carryPool + prizeReserve + opsAccrued + fundAccrued + partnerReserveAccrued;
     }
 
     function surplusBalance() external view returns (uint256) {

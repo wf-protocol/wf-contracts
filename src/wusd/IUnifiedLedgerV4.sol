@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IUnifiedLedgerV3} from "./IUnifiedLedgerV3.sol";
+import {IGameRegistry} from "../protocol/IGameRegistry.sol";
 
-interface IUnifiedLedgerV4 is IUnifiedLedgerV3 {
+interface IUnifiedLedgerV4 {
     struct PurchaseRequestV4 {
         address owner;
         address game;
@@ -17,6 +17,15 @@ interface IUnifiedLedgerV4 is IUnifiedLedgerV3 {
     }
 
     function usedWfOrderIds(bytes32 wfOrderId) external view returns (bool);
+    function gameRegistry() external view returns (IGameRegistry);
+    function balanceOf(address account) external view returns (uint256);
+    function totalWusdLiability() external view returns (uint256);
+    function purchaseNonces(address owner) external view returns (uint256);
+    function invalidatePurchaseNonce(uint256 newNonce) external;
+    function creditFromReserve(address account, uint256 amount) external;
+    function debitToReserve(address account, uint256 amount) external;
+    function protocolTransfer(address recipient, uint256 amount) external;
+    function fundProtocolAccount(address account, uint256 amount, bytes calldata data) external;
     function hashPurchaseAuthorizationV4(PurchaseRequestV4 calldata request) external view returns (bytes32);
 
     function executePurchaseV4(PurchaseRequestV4 calldata request, bytes calldata purchaseData)

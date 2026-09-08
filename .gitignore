@@ -2,6 +2,7 @@
 cache/
 out/
 broadcast/
+deployments/local-*.json
 
 # Local configuration
 .env

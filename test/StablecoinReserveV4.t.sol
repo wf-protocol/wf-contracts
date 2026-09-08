@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {GameRegistry} from "../src/protocol/GameRegistry.sol";
+import {IGameRegistry} from "../src/protocol/IGameRegistry.sol";
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {FeeOnTransferERC20} from "./mocks/FeeOnTransferERC20.sol";
-import {IUnifiedLedgerV2} from "../src/wusd/IUnifiedLedgerV2.sol";
-import {UnifiedLedgerV2} from "../src/wusd/UnifiedLedgerV2.sol";
+import {IUnifiedLedgerV4} from "../src/wusd/IUnifiedLedgerV4.sol";
+import {UnifiedLedgerV4} from "../src/wusd/UnifiedLedgerV4.sol";
 import {StablecoinReserve} from "../src/wusd/StablecoinReserve.sol";
 
-contract WusdLedgerV2Test is Test {
-    UnifiedLedgerV2 internal ledger;
+contract StablecoinReserveV4Test is Test {
+    UnifiedLedgerV4 internal ledger;
     StablecoinReserve internal reserve;
     MockUSDT internal usdt;
     MockUSDT internal usdc;
@@ -37,9 +39,14 @@ contract WusdLedgerV2Test is Test {
         vm.warp(1_800_000_000);
         signer = vm.addr(signerPk);
 
-        UnifiedLedgerV2 ledgerImpl = new UnifiedLedgerV2();
-        ledger = UnifiedLedgerV2(
-            address(new ERC1967Proxy(address(ledgerImpl), abi.encodeCall(UnifiedLedgerV2.initialize, (admin))))
+        UnifiedLedgerV4 ledgerImpl = new UnifiedLedgerV4();
+        ledger = UnifiedLedgerV4(
+            address(
+                new ERC1967Proxy(
+                    address(ledgerImpl),
+                    abi.encodeCall(UnifiedLedgerV4.initialize, (admin, IGameRegistry(address(new GameRegistry()))))
+                )
+            )
         );
 
         StablecoinReserve reserveImpl = new StablecoinReserve();
@@ -47,7 +54,7 @@ contract WusdLedgerV2Test is Test {
             address(
                 new ERC1967Proxy(
                     address(reserveImpl),
-                    abi.encodeCall(StablecoinReserve.initialize, (admin, IUnifiedLedgerV2(address(ledger)), signer))
+                    abi.encodeCall(StablecoinReserve.initialize, (admin, IUnifiedLedgerV4(address(ledger)), signer))
                 )
             )
         );
@@ -115,49 +122,6 @@ contract WusdLedgerV2Test is Test {
         assertEq(reserve.accountedReserve(address(usdc)), 60e6);
         assertEq(reserve.totalRecognizedReserve(), 100e6);
         assertTrue(reserve.isSolvent());
-    }
-
-    function test_GameSpendsUnifiedBalanceRegardlessOfDepositAsset() public {
-        _deposit(user, address(usdt), 99e6, 1);
-
-        vm.prank(admin);
-        ledger.registerOperator(game);
-        vm.prank(user);
-        ledger.approveOperator(game, 10e6);
-
-        vm.prank(game);
-        ledger.operatorTransfer(user, treasury, 1e6);
-
-        assertEq(ledger.balanceOf(user), 98e6);
-        assertEq(ledger.balanceOf(treasury), 1e6);
-        assertEq(ledger.operatorAllowances(user, game), 9e6);
-        assertEq(ledger.totalWusdLiability(), 99e6);
-    }
-
-    function test_DirectGameTransferNeedsNoUserApproval() public {
-        _deposit(user, address(usdt), 10e6, 1);
-
-        vm.startPrank(admin);
-        ledger.registerOperator(game);
-        ledger.setDirectOperator(game, true);
-        vm.stopPrank();
-
-        vm.prank(game);
-        ledger.directOperatorTransfer(user, treasury, 1e6);
-
-        assertEq(ledger.balanceOf(user), 9e6);
-        assertEq(ledger.balanceOf(treasury), 1e6);
-        assertEq(ledger.operatorAllowances(user, game), 0);
-    }
-
-    function test_OrdinaryOperatorCannotUseDirectTransfer() public {
-        _deposit(user, address(usdt), 10e6, 1);
-        vm.prank(admin);
-        ledger.registerOperator(game);
-
-        vm.prank(game);
-        vm.expectRevert(UnifiedLedgerV2.DirectOperatorNotEnabled.selector);
-        ledger.directOperatorTransfer(user, treasury, 1e6);
     }
 
     function test_UserCanWithdrawDifferentHealthyReserveAsset() public {
@@ -239,20 +203,6 @@ contract WusdLedgerV2Test is Test {
         assertEq(reserve.accountedReserve(address(feeToken)), 90e6);
     }
 
-    function test_PausedLedgerRejectsGameTransfer() public {
-        _deposit(user, address(usdt), 10e6, 1);
-        vm.prank(admin);
-        ledger.registerOperator(game);
-        vm.prank(user);
-        ledger.approveOperator(game, 10e6);
-        vm.prank(admin);
-        ledger.pause();
-
-        vm.prank(game);
-        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
-        ledger.operatorTransfer(user, treasury, 1e6);
-    }
-
     function test_ReserveRoleIsOnlyLiabilityCreationPath() public {
         vm.prank(user);
         vm.expectRevert();
@@ -309,24 +259,5 @@ contract WusdLedgerV2Test is Test {
         vm.expectRevert(StablecoinReserve.UnsafeRateChange.selector);
         reserve.setAssetRisk(address(usdt), 1, SINGLE_LIMIT, DAILY_DEPOSIT_LIMIT, DAILY_WITHDRAW_LIMIT);
         vm.stopPrank();
-    }
-
-    function testFuzz_InternalTransfersPreserveTotalLiability(uint96 rawDeposit, uint96 rawSpend) public {
-        uint256 depositAmount = bound(uint256(rawDeposit), 1e6, SINGLE_LIMIT);
-        uint256 spendAmount = bound(uint256(rawSpend), 1, depositAmount);
-        _deposit(user, address(usdt), depositAmount, 1);
-
-        vm.prank(admin);
-        ledger.registerOperator(game);
-        vm.prank(user);
-        ledger.approveOperator(game, spendAmount);
-
-        uint256 liabilityBefore = ledger.totalWusdLiability();
-        vm.prank(game);
-        ledger.operatorTransfer(user, treasury, spendAmount);
-
-        assertEq(ledger.totalWusdLiability(), liabilityBefore);
-        assertEq(ledger.balanceOf(user) + ledger.balanceOf(treasury), liabilityBefore);
-        assertGe(reserve.totalRecognizedReserve(), ledger.totalWusdLiability());
     }
 }
